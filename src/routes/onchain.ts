@@ -1,5 +1,4 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import * as cheerio from 'cheerio';
 import { config } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 import * as cache from '../services/cache';
@@ -202,20 +201,24 @@ function parseFarsideNum(s: string): number | null {
   return neg ? -n : n;
 }
 
-function parseFarside(html: string): Array<{ t: number; flow: number }> {
-  const $ = cheerio.load(html);
+// Farside is Cloudflare-protected (blocks server-side axios via TLS fingerprint),
+// so we fetch through Jina AI Reader which renders the page to a markdown table:
+//   | 26 May 2026 | (192.4) | ... | (333.6) |   ← last column = Total net flow
+function parseFarsideMarkdown(text: string): Array<{ t: number; flow: number }> {
   const rows: Array<{ t: number; flow: number }> = [];
-  $('tr').each((_, tr) => {
-    const cells = $(tr).find('td');
-    if (cells.length < 3) return;
-    const dateText = $(cells[0]).text().trim();
-    const m = /^(\d{1,2})\s+(\w{3})\s+(\d{4})$/.exec(dateText);
-    if (!m) return;
+  for (const line of text.split('\n')) {
+    if (!line.includes('|')) continue;
+    const parts = line.split('|').map((c) => c.trim());
+    while (parts.length && parts[0] === '') parts.shift();
+    while (parts.length && parts[parts.length - 1] === '') parts.pop();
+    if (parts.length < 3) continue;
+    const m = /^(\d{1,2})\s+(\w{3})\s+(\d{4})$/.exec(parts[0]);
+    if (!m) continue;
     const t = Math.floor(Date.parse(`${m[1]} ${m[2]} ${m[3]}`) / 1000);
-    if (!Number.isFinite(t)) return;
-    const flow = parseFarsideNum($(cells[cells.length - 1]).text().trim());
+    if (!Number.isFinite(t)) continue;
+    const flow = parseFarsideNum(parts[parts.length - 1]); // Total column
     if (flow != null) rows.push({ t, flow });
-  });
+  }
   rows.sort((a, b) => a.t - b.t);
   return rows;
 }
@@ -239,12 +242,16 @@ router.get('/btc-etf', async (_req: Request, res: Response, next: NextFunction) 
 
     try {
       const r = await proxyFetch<string>({
-        key: 'onchain:farside:html',
-        url: 'https://farside.co.uk/btc/',
+        key: 'onchain:farside:md',
+        url: 'https://r.jina.ai/https://farside.co.uk/btc/',
         ttlSec: config.cache.etf,
-        axiosConfig: { responseType: 'text', headers: { Accept: 'text/html' } },
+        axiosConfig: {
+          responseType: 'text',
+          timeout: 30_000, // Jina renders the page, so allow more time
+          headers: { Accept: 'text/plain', 'X-Return-Format': 'markdown' },
+        },
       });
-      const parsed = parseFarside(r.data);
+      const parsed = parseFarsideMarkdown(r.data);
       if (parsed.length >= 5) {
         daily = parsed;
         cache.set(PARSED_KEY, parsed, config.cache.etf, config.cache.staleGrace);

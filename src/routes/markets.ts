@@ -590,14 +590,39 @@ router.get('/mmf-deposits', async (_req: Request, res: Response, next: NextFunct
   try {
     let source: 'live' | 'dummy' = 'dummy';
     let mmfRetail: Pt[] = synthPoints(2350, 16, 20, 6);
-    const mmfInst: Pt[] = synthPoints(4050, 16, 25, 5); // ICI (no clean FRED weekly) → dummy
+    // institutional MMF: weekly FRED series (WIMFSL/IMFSL) were discontinued in 2021.
+    // Derive it from real data: total MMF (MMMFFAQ027S) − retail (RMFSL).
+    let mmfInst: Pt[] = synthPoints(4050, 16, 25, 5);
+    let instNote = 'FRED 미연결(더미)';
     let deposits: Pt[] = synthPoints(17400, 16, 40, -5);
 
     if (hasFredKey()) {
+      let retail: Pt[] = [];
       try {
-        const r = await fetchFredPoints('RMFSL', 18);
-        if (r.length) { mmfRetail = r; source = 'live'; }
+        retail = await fetchFredPoints('RMFSL', 18); // retail money funds, $B, monthly
+        if (retail.length) { mmfRetail = retail; source = 'live'; }
       } catch { /* keep dummy */ }
+
+      try {
+        // MMMFFAQ027S = total MMF financial assets, $millions, quarterly → $B
+        const totalQ = (await fetchFredPoints('MMMFFAQ027S', 16)).map((p) => ({ t: p.t, v: p.v / 1000 }));
+        if (totalQ.length && retail.length) {
+          // forward-fill the quarterly total onto retail's monthly timestamps,
+          // then institutional = total − retail (retail + inst === total exactly)
+          const derived = retail
+            .map((r) => {
+              const tot = forwardFill(totalQ, r.t);
+              return tot != null ? { t: r.t, v: Number(Math.max(0, tot - r.v).toFixed(1)) } : null;
+            })
+            .filter((p): p is Pt => p !== null);
+          if (derived.length) {
+            mmfInst = derived;
+            instNote = 'FRED 파생: 총계(MMMFFAQ027S)−소매(RMFSL)';
+            source = 'live';
+          }
+        }
+      } catch { /* keep dummy institutional */ }
+
       try {
         const d = await fetchFredPoints('DPSACBW027SBOG', 18);
         if (d.length) { deposits = d; source = 'live'; }
@@ -606,7 +631,7 @@ router.get('/mmf-deposits', async (_req: Request, res: Response, next: NextFunct
 
     res.json({
       mmfRetail: { points: mmfRetail },
-      mmfInst: { points: mmfInst, note: 'ICI 추정(더미)' },
+      mmfInst: { points: mmfInst, note: instNote },
       deposits: { points: deposits },
       source,
     });
