@@ -17,6 +17,9 @@ export const config = {
 
   fredApiKey: process.env.FRED_API_KEY ?? '',
 
+  // translate English RSS headlines to Korean (free Google endpoint, cached)
+  translateNews: (process.env.TRANSLATE_NEWS ?? 'true') !== 'false',
+
   // admin token gating manual/debug endpoints (e.g. POST /api/push/run).
   // empty + production = those endpoints are disabled.
   adminToken: process.env.ADMIN_TOKEN ?? '',

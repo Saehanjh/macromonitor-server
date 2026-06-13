@@ -691,4 +691,50 @@ router.get('/rates', async (req: Request, res: Response, next: NextFunction) => 
   }
 });
 
+// ── /credit (HY OAS & IG OAS credit spreads) ───────────────────────────
+// HY OAS = ICE BofA US High Yield Index Option-Adjusted Spread (BAMLH0A0HYM2)
+// IG OAS = ICE BofA US Corporate Index Option-Adjusted Spread (BAMLC0A0CM)
+// Wider spread = investors demand more for credit risk = stress / risk-off.
+function levelForHy(v: number): Level {
+  return v < 4 ? 'ok' : v < 6 ? 'warn' : 'danger';
+}
+function levelForIg(v: number): Level {
+  return v < 1.3 ? 'ok' : v < 2 ? 'warn' : 'danger';
+}
+function creditMetric(points: Pt[], kind: 'hy' | 'ig') {
+  const v = points.length ? points[points.length - 1].v : 0;
+  const prev = points.length > 5 ? points[points.length - 6].v : v;
+  return {
+    value: Number(v.toFixed(2)),
+    change: Number((v - prev).toFixed(2)), // 5-obs change, in percentage points
+    level: kind === 'hy' ? levelForHy(v) : levelForIg(v),
+    points: points.slice(-130),
+  };
+}
+
+router.get('/credit', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    let hyPts = synthPoints(3.4, 130, 0.04);
+    let igPts = synthPoints(0.95, 130, 0.012);
+    let source: 'live' | 'dummy' = 'dummy';
+
+    if (hasFredKey()) {
+      const [hy, ig] = await Promise.all([
+        fetchFredPoints('BAMLH0A0HYM2', 260).catch(() => [] as Pt[]),
+        fetchFredPoints('BAMLC0A0CM', 260).catch(() => [] as Pt[]),
+      ]);
+      if (hy.length) { hyPts = hy; source = 'live'; }
+      if (ig.length) { igPts = ig; source = 'live'; }
+    }
+
+    res.json({
+      hy: creditMetric(hyPts, 'hy'),
+      ig: creditMetric(igPts, 'ig'),
+      source,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import * as cheerio from 'cheerio';
 import { config } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
+import { translateBatch } from '../services/translate';
 
 const router = Router();
 
@@ -9,7 +10,8 @@ type NewsCategory = 'fed' | 'bonds' | 'global' | 'tech' | 'onchain';
 
 interface NewsItem {
   id: string;
-  title: string;
+  title: string; // Korean (translated) when available
+  titleEn?: string; // original English headline
   source: string;
   url?: string;
   publishedAt: string;
@@ -124,10 +126,18 @@ router.get('/', async (req, res, next) => {
       return (source === 'dummy' ? within : true) && matches;
     });
 
-    const highlights = filtered.filter((n) => n.highlight).slice(0, 3);
+    let items = filtered.slice(0, 50);
+
+    // translate live English headlines to Korean (cached; best-effort)
+    if (source === 'live' && config.translateNews && items.length) {
+      const titlesKo = await translateBatch(items.map((n) => n.title), 'ko');
+      items = items.map((n, i) => ({ ...n, titleEn: n.title, title: titlesKo[i] || n.title }));
+    }
+
+    const highlights = items.filter((n) => n.highlight).slice(0, 3);
 
     res.json({
-      items: filtered.slice(0, 60),
+      items,
       highlights,
       total: filtered.length,
       window,
