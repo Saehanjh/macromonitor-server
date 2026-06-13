@@ -1,0 +1,38 @@
+# Render Blueprint — deploys the MacroMonitor proxy backend.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Usage:
+#   1) Push this folder (macromonitor-server) to a GitHub repo (render.yaml at root).
+#   2) Render dashboard → New → Blueprint → pick that repo.
+#   3) When prompted, paste FRED_API_KEY (the only secret needing manual entry).
+#   4) Deploy → copy the public URL (https://<name>.onrender.com).
+services:
+  - type: web
+    name: macromonitor-server
+    runtime: node
+    plan: free
+    region: singapore # closest Render region to Korea
+    branch: main
+    # --include=dev forces TypeScript (a devDependency) to install even though
+    # NODE_ENV=production would otherwise skip it, so `tsc` is available to build.
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: RATE_LIMIT_PER_MIN
+        value: "120"
+      - key: PUSH_ENABLED
+        value: "true"
+      - key: ALERT_CRON
+        value: "*/15 * * * *"
+      # admin token for POST /api/push/run — Render generates a random secret
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # FRED key — entered manually in the dashboard (never committed to git)
+      - key: FRED_API_KEY
+        sync: false

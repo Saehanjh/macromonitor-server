@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"C:\\\\Users\\\\재난안전메타버스\\\\Desktop\\\\바이브코딩\\\\macromonitor-app\\\\src\\\\theme.ts\"}",
+  "error": "File does not exist. Note: your current working directory is C:\\Users\\재난안전메타버스\\Desktop\\바이브코딩\\macromonitor-server. Did you mean theme?",
+  "timestamp": "2026-06-12T00:35:55.723Z",
+  "retry_count": 2
+}
