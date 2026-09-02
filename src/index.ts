@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { config } from './config';
+import { config, hasFredKey } from './config';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { rateLimit } from './middleware/rateLimit';
@@ -44,6 +44,8 @@ app.get('/health', (_req, res) => {
     uptime: process.uptime(),
     cacheSize: cache.size(),
     env: config.nodeEnv,
+    // Boolean only: lets deployments be verified without ever exposing a key.
+    fredConfigured: hasFredKey(),
   });
 });
 
