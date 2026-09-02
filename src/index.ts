@@ -23,7 +23,17 @@ import { startAlertCron } from './services/cron';
 const app = express();
 
 app.disable('x-powered-by');
-app.use(cors({ origin: config.corsOrigin }));
+app.use(cors({
+  origin(origin, callback) {
+    // Native Expo clients do not send an Origin header. Browser clients must
+    // match the explicit allow-list (or CORS_ORIGIN=* for local development).
+    if (!origin || config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS origin is not allowed: ${origin}`));
+  },
+}));
 app.use(express.json({ limit: '32kb' }));
 app.use(rateLimit);
 app.use(requestLogger);

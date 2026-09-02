@@ -31,7 +31,7 @@
 3. 방금 만든 `macromonitor-server` 저장소 선택 → Render가 `render.yaml`을 자동 인식
 4. **FRED_API_KEY** 입력란이 뜨면 발급받은 키를 붙여넣기:
    ```
-   31dd85523738096a1b853f94f43c17fb
+   발급받은 본인의 FRED API 키를 입력합니다. 키는 문서·소스·클라이언트 환경변수에 저장하지 마세요.
    ```
 5. **Apply / Create** → 빌드 시작 (약 3~5분)
 

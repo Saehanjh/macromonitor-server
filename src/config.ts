@@ -13,6 +13,7 @@ export const config = {
   port: num('PORT', 4000),
   nodeEnv: process.env.NODE_ENV ?? 'development',
   corsOrigin: process.env.CORS_ORIGIN ?? '*',
+  corsOrigins: (process.env.CORS_ORIGIN ?? '*').split(',').map((origin) => origin.trim()).filter(Boolean),
   logLevel: process.env.LOG_LEVEL ?? 'dev',
 
   fredApiKey: process.env.FRED_API_KEY ?? '',
@@ -25,7 +26,10 @@ export const config = {
   adminToken: process.env.ADMIN_TOKEN ?? '',
 
   // simple per-IP rate limit (requests per minute); 0 disables
-  rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 120),
+  // A mobile dashboard loads several independent cards at once. Keep a
+  // per-IP guard for the public proxy, but allow a normal refresh/navigation
+  // session without producing false 429 responses.
+  rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 300),
 
   cache: {
     price: num('CACHE_TTL_PRICE', 60),

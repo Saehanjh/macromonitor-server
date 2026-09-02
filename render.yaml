@@ -25,7 +25,7 @@ services:
       - key: CORS_ORIGIN
         value: "*"
       - key: RATE_LIMIT_PER_MIN
-        value: "120"
+        value: "300"
       - key: PUSH_ENABLED
         value: "true"
       - key: ALERT_CRON
