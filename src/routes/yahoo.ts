@@ -26,12 +26,28 @@ interface YahooChartResponse {
   };
 }
 
+type QuoteSession = 'regular' | 'extended';
+
+type QuoteSummary = {
+  price: number;
+  currency: 'USD' | 'KRW';
+  changePercent: number | null;
+  asOf: string;
+  session: QuoteSession;
+  /** What the percentage is compared with. */
+  changeBasis: 'previous_close' | 'regular_close';
+};
+
 type QuoteResponse = {
   symbol: string;
   interval: string;
   range: string;
   chart: YahooChartResponse['chart'];
   source: string;
+  /** Server time of the original successful upstream response, not this cache hit. */
+  fetchedAt: string;
+  cacheAgeSec: number;
+  quote: QuoteSummary;
 };
 
 const YAHOO_HEADERS = {
@@ -91,13 +107,76 @@ function isProviderUnavailable(error: unknown): boolean {
   return status === 400 || status === 401 || status === 403 || status === 404 || status === 408 || status === 429 || status === 451 || status >= 500;
 }
 
-async function fetchQuote(symbol: string, interval: string, range: string): Promise<{ chart: YahooChartResponse['chart']; source: string }> {
+function finite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function lastValidBar(chart: YahooChartResponse['chart']): { price: number; timestamp: number } | null {
+  const result = chart.result?.[0];
+  const closes = result?.indicators?.quote?.[0]?.close ?? [];
+  const timestamps = result?.timestamp ?? [];
+  for (let index = Math.min(closes.length, timestamps.length) - 1; index >= 0; index -= 1) {
+    const price = closes[index];
+    const timestamp = timestamps[index];
+    if (finite(price) && price > 0 && finite(timestamp) && timestamp > 0) {
+      return { price, timestamp };
+    }
+  }
+  return null;
+}
+
+/**
+ * Build an explicit quote contract from Yahoo's chart response. The original
+ * app recomputed a percentage from a different close field and treated every
+ * chart meta price as live. Keeping the provider value and the market session
+ * together makes the displayed number auditable.
+ */
+export function summarizeQuote(chart: YahooChartResponse['chart']): QuoteSummary {
+  const meta = chart.result?.[0]?.meta ?? {};
+  const regularPrice = meta.regularMarketPrice;
+  const regularTime = meta.regularMarketTime;
+  const currency = meta.currency;
+  if (!finite(regularPrice) || regularPrice <= 0 || !finite(regularTime) || regularTime <= 0 || (currency !== 'USD' && currency !== 'KRW')) {
+    throw new Error('시세 제공자가 완전한 가격 기준정보를 반환하지 않았습니다.');
+  }
+
+  const bar = lastValidBar(chart);
+  // For an intraday request with includePrePost=true, a bar after the regular
+  // timestamp is a real provider-supplied extended-hours value. Daily bars
+  // never satisfy this condition, so they retain the official regular price.
+  const isExtended = !!bar && bar.timestamp > regularTime + 60;
+  const price = isExtended ? bar!.price : regularPrice;
+  const asOfSeconds = isExtended ? bar!.timestamp : regularTime;
+  const previousClose = finite(meta.previousClose) && meta.previousClose > 0
+    ? meta.previousClose
+    : finite(meta.chartPreviousClose) && meta.chartPreviousClose > 0
+      ? meta.chartPreviousClose
+      : null;
+  const regularPercent = meta.regularMarketChangePercent;
+  const extendedReference = regularPrice;
+  const changePercent = isExtended
+    ? (extendedReference > 0 ? (price / extendedReference - 1) * 100 : null)
+    : finite(regularPercent)
+      ? regularPercent
+      : previousClose ? (price / previousClose - 1) * 100 : null;
+
+  return {
+    price,
+    currency,
+    changePercent,
+    asOf: new Date(asOfSeconds * 1000).toISOString(),
+    session: isExtended ? 'extended' : 'regular',
+    changeBasis: isExtended ? 'regular_close' : 'previous_close',
+  };
+}
+
+async function fetchQuote(symbol: string, interval: string, range: string): Promise<{ chart: YahooChartResponse['chart']; source: string; fetchedAt: number }> {
   let lastError: unknown;
   // Yahoo serves the same public chart API from two hosts. Render/free-tier
   // egress can intermittently receive a 404 or 429 from one host, so retry the
   // second host before reporting a symbol failure. No fabricated quote is used.
   for (const host of ['query1.finance.yahoo.com', 'query2.finance.yahoo.com']) {
-    const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false&events=div,splits`;
+    const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=true&events=div,splits`;
     // The two Yahoo hostnames contain the same data. Sharing a cache key means
     // a successful retry is available regardless of which host served it.
     const cacheKey = `yahoo:${symbol}:${interval}:${range}`;
@@ -105,11 +184,12 @@ async function fetchQuote(symbol: string, interval: string, range: string): Prom
       const result = await proxyFetch<YahooChartResponse>({
         key: cacheKey,
         url,
-        ttlSec: config.cache.price,
+        ttlSec: config.quoteCacheTtlSec,
+        staleGraceSec: config.quoteStaleGraceSec,
         axiosConfig: { headers: YAHOO_HEADERS },
         beforeFetch: reserveYahooRequest,
       });
-      return { chart: result.data.chart, source: result.source };
+      return { chart: result.data.chart, source: result.source, fetchedAt: result.fetchedAt };
     } catch (error) {
       lastError = error;
       noteYahooFailure(error);
@@ -129,7 +209,17 @@ function parseSymbols(value: unknown): string[] {
 
 async function respondForSymbol(symbol: string, interval: string, range: string): Promise<QuoteResponse> {
   const result = await fetchQuote(symbol, interval, range);
-  return { symbol, interval, range, chart: result.chart, source: result.source };
+  const now = Date.now();
+  return {
+    symbol,
+    interval,
+    range,
+    chart: result.chart,
+    source: result.source,
+    fetchedAt: new Date(result.fetchedAt).toISOString(),
+    cacheAgeSec: Math.max(0, Math.floor((now - result.fetchedAt) / 1000)),
+    quote: summarizeQuote(result.chart),
+  };
 }
 
 // Batch is the preferred mobile path: one client request and a bounded,

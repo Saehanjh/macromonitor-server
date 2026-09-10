@@ -63,6 +63,11 @@ export const config = {
     staleGrace: num('CACHE_STALE_GRACE', 86400),
   },
 
+  // Quotes are allowed a short cache to protect Yahoo, but a quote older than
+  // this stale window is intentionally unavailable rather than called current.
+  quoteCacheTtlSec: num('QUOTE_CACHE_TTL_SEC', 60),
+  quoteStaleGraceSec: num('QUOTE_STALE_GRACE_SEC', 900),
+
   // Yahoo's public endpoint applies limits per egress IP. These values are
   // deliberately conservative and can be tuned without an app release.
   yahooMinIntervalMs: num('YAHOO_MIN_INTERVAL_MS', 650),
