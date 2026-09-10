@@ -49,6 +49,13 @@ let yahooCooldownUntil = 0;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+class YahooRateLimitedError extends Error {
+  constructor() {
+    super('Yahoo 시세 제공자가 요청을 잠시 제한했습니다. 잠시 후 다시 시도해 주세요.');
+    this.name = 'YahooRateLimitedError';
+  }
+}
+
 /**
  * Render users share an outbound IP. Serialize only cache-miss Yahoo calls so
  * ten dashboard tickers do not become a simultaneous anonymous-provider burst.
@@ -56,7 +63,10 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 function reserveYahooRequest(): Promise<void> {
   const task = yahooQueue.then(async () => {
     const now = Date.now();
-    const delay = Math.max(0, nextYahooRequestAt - now, yahooCooldownUntil - now);
+    // A known provider cooldown is a circuit breaker, not a reason to make
+    // every request wait for two minutes and then time out on the phone.
+    if (now < yahooCooldownUntil) throw new YahooRateLimitedError();
+    const delay = Math.max(0, nextYahooRequestAt - now);
     if (delay) await sleep(delay);
     nextYahooRequestAt = Date.now() + config.yahooMinIntervalMs;
   });
@@ -72,7 +82,7 @@ function noteYahooFailure(error: unknown): void {
 }
 
 function isRateLimited(error: unknown): boolean {
-  return axios.isAxiosError(error) && error.response?.status === 429;
+  return error instanceof YahooRateLimitedError || (axios.isAxiosError(error) && error.response?.status === 429);
 }
 
 function isProviderUnavailable(error: unknown): boolean {
@@ -138,13 +148,19 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     // A single upstream worker is intentional. The public Yahoo API limits
     // shared Render egress addresses; cache hits still return immediately.
     let cursor = 0;
+    let providerRateLimited = false;
     const worker = async () => {
       while (cursor < symbols.length) {
         const index = cursor++;
         const symbol = symbols[index];
+        if (providerRateLimited) {
+          failures.push({ symbol, message: '시세 제공자가 요청을 잠시 제한했습니다. 잠시 후 다시 시도해 주세요.' });
+          continue;
+        }
         try {
           items[index] = await respondForSymbol(symbol, interval, range);
         } catch (error) {
+          if (isRateLimited(error)) providerRateLimited = true;
           failures.push({ symbol, message: error instanceof Error ? error.message : 'quote unavailable' });
         }
       }
