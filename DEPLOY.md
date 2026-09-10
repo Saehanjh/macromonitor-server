@@ -45,6 +45,10 @@
 - 또한 `그-주소/api/news?window=d3` 열어 실제 뉴스 JSON 확인
 - 시세 배치 확인: `그-주소/api/yahoo?symbols=NVDA&interval=1d&range=1d`에서 `items` 배열이 반환되는지 확인합니다. Yahoo가 일시 제한될 때는 `source:"fallback"`으로 지연 시세가 표시될 수 있습니다.
 
+Render의 Environment에 `PERSONAL_SESSION_SECRET`를 추가하고 32자 이상의
+임의의 긴 문자열을 입력하세요. 이 값은 모바일 앱에 넣지 않습니다. 앱이 처음
+개인 브리핑·이벤트를 열 때 설치별 세션을 자동으로 발급받습니다.
+
 ---
 
 ## 4) 앱(APK)을 이 주소로 재빌드

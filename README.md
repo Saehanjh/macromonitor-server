@@ -6,8 +6,10 @@
 ## 개인 브리핑 API (Phase C)
 
 개인 보유정보와 수집 결과는 `/api/personal/v1` 아래 별도 계약으로 관리합니다.
-서버에 `PERSONAL_API_TOKEN`을 설정한 뒤 모바일 클라이언트에는 토큰을 넣지 말고,
-인증을 담당하는 배포 계층에서 짧은 세션 토큰을 발급하세요. 로컬 테스트는
+운영 서버에는 `PERSONAL_SESSION_SECRET`을 설정하세요. 모바일 앱은 설치마다
+기기별 세션 토큰을 발급받으며, APK에는 `PERSONAL_API_TOKEN`이나 Supabase 키를
+넣지 않습니다. `PERSONAL_API_TOKEN`은 서버 작업자용으로만 사용할 수 있습니다.
+로컬 테스트는
 `PERSONAL_API_ALLOW_LOCAL=true`와 `X-Owner-Id`를 함께 사용할 수 있습니다.
 
 `PERSONAL_STORE_PATH`는 기본적으로 `data/personal-store.json`입니다. 이 파일은

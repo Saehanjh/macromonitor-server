@@ -22,9 +22,12 @@ server mode must treat `source: "dummy"` as unavailable live data.
 
 ## Personal read model (Phase C)
 
-Routes under `/api/personal/v1` require `Authorization: Bearer $PERSONAL_API_TOKEN`
-or `X-Personal-Token`. They derive the owner on the server; no owner id from the
-request body is trusted. For local development only, set
+`POST /api/personal/v1/session` accepts a random per-install `deviceId` and returns
+an opaque, signed session token. The signing secret stays in Render as
+`PERSONAL_SESSION_SECRET`; the mobile app stores only its own session token and
+never contains `PERSONAL_API_TOKEN` or a Supabase key. Other routes accept the
+returned token in `Authorization: Bearer ...` or `X-Personal-Token`. They derive
+the owner on the server; no owner id from the request body is trusted. For local development only, set
 `PERSONAL_API_ALLOW_LOCAL=true` and send `X-Owner-Id`.
 
 - `GET /api/personal/v1/instruments/search?q=` and `POST /instruments`

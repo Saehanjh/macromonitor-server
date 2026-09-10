@@ -1,18 +1,62 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import crypto from 'node:crypto';
 import { config } from '../config';
 import { INTERNAL_HEADER, INTERNAL_SECRET } from '../services/internalAuth';
 import * as db from '../services/personalStore';
 
 const router = Router();
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 365;
+
+function sessionSecret(): string {
+  return config.personalSessionSecret || config.personalApiToken;
+}
+
+function signSession(ownerId: string): string {
+  const payload = Buffer.from(`${ownerId}.${Math.floor(Date.now() / 1000)}`, 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', sessionSecret()).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function sessionOwner(token: string): string | null {
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature || !sessionSecret()) return null;
+  const expected = crypto.createHmac('sha256', sessionSecret()).update(payload).digest('base64url');
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const [ownerId, issuedAt] = Buffer.from(payload, 'base64url').toString('utf8').split('.');
+    const age = Math.floor(Date.now() / 1000) - Number(issuedAt);
+    if (!ownerId || !/^[a-f0-9]{64}$/.test(ownerId) || !Number.isFinite(age) || age < 0 || age > SESSION_TTL_SECONDS) return null;
+    return ownerId;
+  } catch { return null; }
+}
+
+function deviceOwner(deviceId: string): string {
+  return crypto.createHmac('sha256', sessionSecret()).update(`device:${deviceId}`).digest('hex');
+}
+
+// Public bootstrap endpoint. It creates a stable owner id from a random
+// per-install device id; the returned bearer token is unique to that install.
+router.post('/session', (req, res) => {
+  const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId.trim() : '';
+  if (!sessionSecret()) return res.status(503).json({ error: 'personal_session_unavailable', message: '서버에 개인 세션 비밀값이 설정되지 않았습니다. Render 환경변수 PERSONAL_SESSION_SECRET를 설정해 주세요.' });
+  if (!/^[A-Za-z0-9._:-]{16,128}$/.test(deviceId)) return bad(res, '기기 식별자가 필요합니다. 앱을 최신 버전으로 다시 설치해 주세요.');
+  const ownerId = deviceOwner(deviceId);
+  return res.status(201).json({ ownerId, token: signSession(ownerId), expiresIn: SESSION_TTL_SECONDS });
+});
+
 function auth(req: Request, res: Response, next: NextFunction) {
   const bearer = req.header('authorization')?.replace(/^Bearer\s+/i, '');
   const token = req.header('x-personal-token') || bearer;
   if (config.personalApiToken && token === config.personalApiToken) { (req as any).ownerId = 'default'; return next(); }
+  const ownerId = token ? sessionOwner(token) : null;
+  if (ownerId) { (req as any).ownerId = ownerId; return next(); }
   if (config.personalApiAllowLocal && config.nodeEnv !== 'production') {
     const owner = req.header('x-owner-id')?.trim();
     if (owner && /^[A-Za-z0-9_.-]{1,80}$/.test(owner)) { (req as any).ownerId = owner; return next(); }
   }
-  return res.status(config.personalApiToken || config.personalApiAllowLocal ? 401 : 503).json({ error: 'personal_api_unavailable', message: config.personalApiToken ? '인증이 필요합니다.' : '개인 API 인증이 구성되지 않았습니다.' });
+  return res.status(config.personalApiToken || config.personalSessionSecret || config.personalApiAllowLocal ? 401 : 503).json({ error: 'personal_api_unavailable', message: config.personalApiToken || config.personalSessionSecret ? '개인 API 인증이 필요합니다.' : '서버에 개인 세션 비밀값이 설정되지 않았습니다. Render 환경변수 PERSONAL_SESSION_SECRET를 설정해 주세요.' });
 }
 function owner(req: Request) { return (req as any).ownerId as string; }
 function bad(res: Response, message: string) { return res.status(400).json({ error: 'invalid_request', message }); }

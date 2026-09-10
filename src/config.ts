@@ -27,6 +27,9 @@ export const config = {
 
   // Personal API authentication. Keep this server-side; never expose it in Expo.
   personalApiToken: process.env.PERSONAL_API_TOKEN ?? '',
+  // Per-device mobile sessions are signed by this server-only secret. A shared
+  // personalApiToken remains available for private workers/admin tooling.
+  personalSessionSecret: process.env.PERSONAL_SESSION_SECRET ?? '',
   // Explicit opt-in for local development only. This never enables in production.
   personalApiAllowLocal: (process.env.PERSONAL_API_ALLOW_LOCAL ?? 'false') === 'true',
   personalStorePath: process.env.PERSONAL_STORE_PATH ?? './data/personal-store.json',

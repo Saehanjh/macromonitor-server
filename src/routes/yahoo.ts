@@ -34,8 +34,10 @@ type QuoteResponse = {
   source: string;
 };
 
-function isRateLimited(error: unknown): boolean {
-  return axios.isAxiosError(error) && error.response?.status === 429;
+function isProviderUnavailable(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  const status = error.response?.status ?? 0;
+  return status === 400 || status === 401 || status === 403 || status === 404 || status === 408 || status === 429 || status === 451 || status >= 500;
 }
 
 /**
@@ -45,7 +47,7 @@ function isRateLimited(error: unknown): boolean {
  * an exchange real-time quote.
  */
 async function fetchStooq(symbol: string): Promise<YahooChartResponse> {
-  const normalized = symbol.toLowerCase().replace(/\.ks$/i, '.kr');
+  const normalized = stooqSymbol(symbol);
   const response = await axios.get<string>(
     `https://stooq.com/q/l/?s=${encodeURIComponent(normalized)}&f=sd2t2ohlcv&h&e=csv`,
     { timeout: config.upstreamTimeoutMs, headers: { Accept: 'text/csv' } },
@@ -59,14 +61,12 @@ async function fetchStooq(symbol: string): Promise<YahooChartResponse> {
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(timestamp)) {
     throw new Error('Stooq returned an invalid quote');
   }
-  const previous = Number(open);
   const currency = normalized.endsWith('.kr') ? 'KRW' : 'USD';
   return {
     chart: {
       result: [{
         meta: {
           regularMarketPrice: price,
-          previousClose: Number.isFinite(previous) && previous > 0 ? previous : undefined,
           regularMarketTime: Math.floor(timestamp / 1000),
           currency,
         },
@@ -76,6 +76,13 @@ async function fetchStooq(symbol: string): Promise<YahooChartResponse> {
   };
 }
 
+export function stooqSymbol(symbol: string): string {
+  const raw = symbol.trim().toLowerCase();
+  if (/\.(ks|kq)$/i.test(raw)) return raw.replace(/\.(ks|kq)$/i, '.kr');
+  if (/^[a-z]{1,6}(?:[.-][a-z])?$/.test(raw)) return `${raw.replace('.', '-')}.us`;
+  return raw;
+}
+
 async function fetchQuote(symbol: string, interval: string, range: string): Promise<{ chart: YahooChartResponse['chart']; source: string }> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false&events=div,splits`;
   const cacheKey = `yahoo:${symbol}:${interval}:${range}`;
@@ -83,7 +90,7 @@ async function fetchQuote(symbol: string, interval: string, range: string): Prom
     const result = await proxyFetch<YahooChartResponse>({ key: cacheKey, url, ttlSec: config.cache.price });
     return { chart: result.data.chart, source: result.source };
   } catch (error) {
-    if (!isRateLimited(error)) throw error;
+    if (!isProviderUnavailable(error)) throw error;
     const fallback = await fetchStooq(symbol);
     return { chart: fallback.chart, source: 'fallback' };
   }
@@ -112,13 +119,22 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const range = typeof req.query.range === 'string' && VALID_RANGES.has(req.query.range) ? req.query.range : '1d';
     const items: QuoteResponse[] = [];
     const failures: Array<{ symbol: string; message: string }> = [];
-    for (const symbol of symbols) {
-      try {
-        items.push(await respondForSymbol(symbol, interval, range));
-      } catch (error) {
-        failures.push({ symbol, message: error instanceof Error ? error.message : 'quote unavailable' });
+    // Two concurrent upstream requests keep a mobile refresh responsive while
+    // avoiding a burst that triggers Yahoo's anonymous-IP throttling.
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < symbols.length) {
+        const index = cursor++;
+        const symbol = symbols[index];
+        try {
+          items[index] = await respondForSymbol(symbol, interval, range);
+        } catch (error) {
+          failures.push({ symbol, message: error instanceof Error ? error.message : 'quote unavailable' });
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, symbols.length) }, worker));
+    items.sort((a, b) => symbols.indexOf(a.symbol) - symbols.indexOf(b.symbol));
     res.json({ items, failures, requested: symbols.length, succeeded: items.length });
   } catch (error) {
     next(error);
