@@ -19,6 +19,9 @@ import onchainRouter from './routes/onchain';
 import treasuryRouter from './routes/treasury';
 import pushRouter from './routes/push';
 import { startAlertCron } from './services/cron';
+import personalRouter from './routes/personal';
+import { startBriefingCron } from './services/briefingCron';
+import { initializePersonalStore } from './services/personalStore';
 
 const app = express();
 
@@ -41,6 +44,8 @@ app.use(requestLogger);
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
+    apiVersion: '2026-09-10',
+    capabilities: ['quotes.batch', 'personal.briefings', 'personal.events', 'personal.notes'],
     uptime: process.uptime(),
     cacheSize: cache.size(),
     env: config.nodeEnv,
@@ -61,14 +66,17 @@ app.use('/api/global', globalRouter);
 app.use('/api/onchain', onchainRouter);
 app.use('/api/treasury', treasuryRouter);
 app.use('/api/push', pushRouter);
+app.use('/api/personal/v1', personalRouter);
 
 app.use(notFound);
 app.use(errorHandler);
 
-const server = app.listen(config.port, () => {
+const server = app.listen(config.port, async () => {
+  await initializePersonalStore();
   console.log(`[macromonitor-server] listening on http://localhost:${config.port}`);
   console.log(`[macromonitor-server] env=${config.nodeEnv} corsOrigin=${config.corsOrigin}`);
   startAlertCron();
+  startBriefingCron();
 });
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)));

@@ -41,8 +41,9 @@
 
 - 배포 완료되면 대시보드 상단에 주소가 표시됩니다:
   `https://macromonitor-server.onrender.com` (이름이 선점됐으면 뒤에 임의 문자 붙음)
-- 브라우저에서 `그-주소/health` 열기 → `{"status":"ok",...}` 보이면 성공
+- 브라우저에서 `그-주소/health` 열기 → `{"status":"ok", "apiVersion":"2026-09-10", "capabilities":[...]}`가 보여야 최신 서버입니다. `capabilities`가 없으면 아직 구버전 배포본입니다.
 - 또한 `그-주소/api/news?window=d3` 열어 실제 뉴스 JSON 확인
+- 시세 배치 확인: `그-주소/api/yahoo?symbols=NVDA&interval=1d&range=1d`에서 `items` 배열이 반환되는지 확인합니다. Yahoo가 일시 제한될 때는 `source:"fallback"`으로 지연 시세가 표시될 수 있습니다.
 
 ---
 
@@ -67,7 +68,7 @@ git add -A
 git commit -m "수정 내용"
 git push
 ```
-→ Render가 자동으로 다시 배포합니다(`autoDeploy: true`).
+→ Render가 자동으로 다시 배포합니다(`autoDeploy: true`). 배포가 멈추면 Render의 **Manual Deploy → Clear build cache & deploy**를 선택하세요.
 
 ---
 

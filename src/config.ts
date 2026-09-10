@@ -25,6 +25,22 @@ export const config = {
   // empty + production = those endpoints are disabled.
   adminToken: process.env.ADMIN_TOKEN ?? '',
 
+  // Personal API authentication. Keep this server-side; never expose it in Expo.
+  personalApiToken: process.env.PERSONAL_API_TOKEN ?? '',
+  // Explicit opt-in for local development only. This never enables in production.
+  personalApiAllowLocal: (process.env.PERSONAL_API_ALLOW_LOCAL ?? 'false') === 'true',
+  personalStorePath: process.env.PERSONAL_STORE_PATH ?? './data/personal-store.json',
+  // Optional Supabase PostgREST persistence. The service-role key is server-only.
+  supabaseUrl: process.env.SUPABASE_URL ?? '',
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
+  personalStoreBackend: (process.env.PERSONAL_STORE_BACKEND ?? 'json') as 'json' | 'supabase',
+  briefing: {
+    enabled: (process.env.BRIEFING_ENABLED ?? 'false') === 'true',
+    cron: process.env.BRIEFING_CRON ?? '30 21 * * 0-4',
+    ownerId: process.env.BRIEFING_OWNER_ID ?? 'default',
+    internalSecret: process.env.BRIEFING_INTERNAL_SECRET ?? '',
+  },
+
   // simple per-IP rate limit (requests per minute); 0 disables
   // A mobile dashboard loads several independent cards at once. Keep a
   // per-IP guard for the public proxy, but allow a normal refresh/navigation
