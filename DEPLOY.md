@@ -43,7 +43,7 @@
   `https://macromonitor-server.onrender.com` (이름이 선점됐으면 뒤에 임의 문자 붙음)
 - 브라우저에서 `그-주소/health` 열기 → `{"status":"ok", "apiVersion":"2026-09-10", "capabilities":[...]}`가 보여야 최신 서버입니다. `capabilities`가 없으면 아직 구버전 배포본입니다.
 - 또한 `그-주소/api/news?window=d3` 열어 실제 뉴스 JSON 확인
-- 시세 배치 확인: `그-주소/api/yahoo?symbols=NVDA&interval=1d&range=1d`에서 `items` 배열이 반환되는지 확인합니다. Yahoo가 일시 제한될 때는 `source:"fallback"`으로 지연 시세가 표시될 수 있습니다.
+- 시세 배치 확인: `그-주소/api/yahoo?symbols=NVDA&interval=1d&range=1d`에서 `items` 배열이 반환되는지 확인합니다. Yahoo의 두 공개 호스트를 순서대로 시도하며, 둘 다 실패하면 해당 종목을 실패 목록으로 표시합니다.
 
 Render의 Environment에 `PERSONAL_SESSION_SECRET`를 추가하고 32자 이상의
 임의의 긴 문자열을 입력하세요. 이 값은 모바일 앱에 넣지 않습니다. 앱이 처음

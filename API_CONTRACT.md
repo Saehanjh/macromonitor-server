@@ -1,7 +1,7 @@
 # MacroMonitor server API contract
 
 All routes return JSON. Successful cached routes may include `source` (`fresh`,
-`cache`, `stale`, `live`, `fallback`, `partial`, or `dummy`) and `X-Cache`. A client in
+`cache`, `stale`, `live`, `partial`, or `dummy`) and `X-Cache`. A client in
 server mode must treat `source: "dummy"` as unavailable live data.
 
 ## Public routes

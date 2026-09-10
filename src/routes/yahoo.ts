@@ -40,60 +40,23 @@ function isProviderUnavailable(error: unknown): boolean {
   return status === 400 || status === 401 || status === 403 || status === 404 || status === 408 || status === 429 || status === 451 || status >= 500;
 }
 
-/**
- * Yahoo's public chart endpoint occasionally rate-limits an entire Render
- * instance. Stooq is a delayed, keyless fallback for the same display use
- * case. It is deliberately marked `fallback` so the app never presents it as
- * an exchange real-time quote.
- */
-async function fetchStooq(symbol: string): Promise<YahooChartResponse> {
-  const normalized = stooqSymbol(symbol);
-  const response = await axios.get<string>(
-    `https://stooq.com/q/l/?s=${encodeURIComponent(normalized)}&f=sd2t2ohlcv&h&e=csv`,
-    { timeout: config.upstreamTimeoutMs, headers: { Accept: 'text/csv' } },
-  );
-  const line = response.data.trim().split(/\r?\n/).find((candidate) => candidate && !/^Symbol,Date/i.test(candidate));
-  if (!line) throw new Error('Stooq returned no quote row');
-  const fields = line.split(',').map((field) => field.trim());
-  const [, date, time, open, high, low, close] = fields;
-  const price = Number(close);
-  const timestamp = Date.parse(`${date}T${time}Z`);
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(timestamp)) {
-    throw new Error('Stooq returned an invalid quote');
-  }
-  const currency = normalized.endsWith('.kr') ? 'KRW' : 'USD';
-  return {
-    chart: {
-      result: [{
-        meta: {
-          regularMarketPrice: price,
-          regularMarketTime: Math.floor(timestamp / 1000),
-          currency,
-        },
-      }],
-      error: null,
-    },
-  };
-}
-
-export function stooqSymbol(symbol: string): string {
-  const raw = symbol.trim().toLowerCase();
-  if (/\.(ks|kq)$/i.test(raw)) return raw.replace(/\.(ks|kq)$/i, '.kr');
-  if (/^[a-z]{1,6}(?:[.-][a-z])?$/.test(raw)) return `${raw.replace('.', '-')}.us`;
-  return raw;
-}
-
 async function fetchQuote(symbol: string, interval: string, range: string): Promise<{ chart: YahooChartResponse['chart']; source: string }> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false&events=div,splits`;
-  const cacheKey = `yahoo:${symbol}:${interval}:${range}`;
-  try {
-    const result = await proxyFetch<YahooChartResponse>({ key: cacheKey, url, ttlSec: config.cache.price });
-    return { chart: result.data.chart, source: result.source };
-  } catch (error) {
-    if (!isProviderUnavailable(error)) throw error;
-    const fallback = await fetchStooq(symbol);
-    return { chart: fallback.chart, source: 'fallback' };
+  let lastError: unknown;
+  // Yahoo serves the same public chart API from two hosts. Render/free-tier
+  // egress can intermittently receive a 404 or 429 from one host, so retry the
+  // second host before reporting a symbol failure. No fabricated quote is used.
+  for (const host of ['query1.finance.yahoo.com', 'query2.finance.yahoo.com']) {
+    const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false&events=div,splits`;
+    const cacheKey = `yahoo:${host}:${symbol}:${interval}:${range}`;
+    try {
+      const result = await proxyFetch<YahooChartResponse>({ key: cacheKey, url, ttlSec: config.cache.price });
+      return { chart: result.data.chart, source: result.source };
+    } catch (error) {
+      lastError = error;
+      if (!isProviderUnavailable(error)) throw error;
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error('Yahoo 시세 제공자가 응답하지 않았습니다.');
 }
 
 function parseSymbols(value: unknown): string[] {
