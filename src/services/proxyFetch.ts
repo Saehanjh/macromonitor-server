@@ -9,6 +9,12 @@ export interface ProxyFetchOptions {
   url: string;
   ttlSec: number;
   axiosConfig?: AxiosRequestConfig;
+  /**
+   * Optional provider-specific gate. It is intentionally called only for a
+   * cache miss/background refresh, never for a cache hit, so an upstream
+   * provider cannot be hammered by several public API requests at once.
+   */
+  beforeFetch?: () => Promise<void>;
 }
 
 export interface ProxyResult<T> {
@@ -17,7 +23,8 @@ export interface ProxyResult<T> {
   fetchedAt: number;
 }
 
-async function fetchUpstream<T>(url: string, axiosConfig?: AxiosRequestConfig): Promise<T> {
+async function fetchUpstream<T>(url: string, axiosConfig?: AxiosRequestConfig, beforeFetch?: () => Promise<void>): Promise<T> {
+  await beforeFetch?.();
   const resp = await axios.get<T>(url, {
     timeout: config.upstreamTimeoutMs,
     ...axiosConfig,
@@ -35,6 +42,7 @@ export async function proxyFetch<T>({
   url,
   ttlSec,
   axiosConfig,
+  beforeFetch,
 }: ProxyFetchOptions): Promise<ProxyResult<T>> {
   const cached = cache.lookup<T>(key);
 
@@ -44,7 +52,7 @@ export async function proxyFetch<T>({
 
   if (cached.status === 'stale' && cached.data !== null) {
     if (!inflight.has(key)) {
-      const p = fetchUpstream<T>(url, axiosConfig)
+      const p = fetchUpstream<T>(url, axiosConfig, beforeFetch)
         .then((data) => {
           cache.set(key, data, ttlSec, config.cache.staleGrace);
           return data;
@@ -66,7 +74,7 @@ export async function proxyFetch<T>({
     return { data, source: 'fresh', fetchedAt: Date.now() };
   }
 
-  const p = fetchUpstream<T>(url, axiosConfig)
+  const p = fetchUpstream<T>(url, axiosConfig, beforeFetch)
     .then((data) => {
       cache.set(key, data, ttlSec, config.cache.staleGrace);
       return data;

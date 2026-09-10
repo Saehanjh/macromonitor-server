@@ -51,7 +51,10 @@ export const config = {
   rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 300),
 
   cache: {
-    price: num('CACHE_TTL_PRICE', 60),
+    // A no-key market-data endpoint is not designed for per-screen refreshes.
+    // Five minutes keeps the dashboard useful while dramatically reducing
+    // repeated requests from a shared Render egress IP.
+    price: num('CACHE_TTL_PRICE', 300),
     macro: num('CACHE_TTL_MACRO', 3600),
     onchain: num('CACHE_TTL_ONCHAIN', 300),
     stable: num('CACHE_TTL_STABLE', 900), // CoinGecko stablecoin charts (rate-limit hardening)
@@ -59,6 +62,11 @@ export const config = {
     etf: num('CACHE_TTL_ETF', 1800), // Farside BTC ETF HTML
     staleGrace: num('CACHE_STALE_GRACE', 86400),
   },
+
+  // Yahoo's public endpoint applies limits per egress IP. These values are
+  // deliberately conservative and can be tuned without an app release.
+  yahooMinIntervalMs: num('YAHOO_MIN_INTERVAL_MS', 650),
+  yahooCooldownSec: num('YAHOO_COOLDOWN_SEC', 120),
 
   upstreamTimeoutMs: num('UPSTREAM_TIMEOUT_MS', 10000),
 
