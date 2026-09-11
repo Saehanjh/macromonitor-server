@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { summarizeQuote } from './yahoo';
+import { historicalPoints, instrumentCandidates, summarizeQuote } from './yahoo';
 
 const regularChart = {
   result: [{
@@ -39,4 +39,17 @@ test('newer intraday bar is explicitly an extended-hours quote', () => {
   assert.equal(quote.session, 'extended');
   assert.equal(quote.changeBasis, 'regular_close');
   assert.ok(Math.abs((quote.changePercent ?? 0) - 3) < 1e-10);
+});
+
+test('instrument candidates preserve US symbols and resolve both Korean exchanges', () => {
+  assert.deepEqual(instrumentCandidates('app', 'US'), ['APP']);
+  assert.deepEqual(instrumentCandidates('357780', 'KR'), ['357780.KS', '357780.KQ']);
+  assert.deepEqual(instrumentCandidates('005930.KS', 'KR'), ['005930.KS']);
+  assert.deepEqual(instrumentCandidates('../bad', 'US'), []);
+});
+
+test('historical points omit incomplete or invalid provider bars', () => {
+  assert.deepEqual(historicalPoints({
+    result: [{ meta: {}, timestamp: [10, 20, 30, 40], indicators: { quote: [{ close: [12, null, -1, 15] }] } }],
+  }), [{ t: 10, close: 12 }, { t: 40, close: 15 }]);
 });

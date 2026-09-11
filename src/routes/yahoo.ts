@@ -28,7 +28,7 @@ interface YahooChartResponse {
 
 type QuoteSession = 'regular' | 'extended';
 
-type QuoteSummary = {
+export type QuoteSummary = {
   price: number;
   currency: 'USD' | 'KRW';
   changePercent: number | null;
@@ -38,7 +38,7 @@ type QuoteSummary = {
   changeBasis: 'previous_close' | 'regular_close';
 };
 
-type QuoteResponse = {
+export type QuoteResponse = {
   symbol: string;
   interval: string;
   range: string;
@@ -48,6 +48,16 @@ type QuoteResponse = {
   fetchedAt: string;
   cacheAgeSec: number;
   quote: QuoteSummary;
+};
+
+type InstrumentMarket = 'US' | 'KR';
+type ChartPeriod = 'daily' | 'weekly' | 'monthly';
+
+const PUBLIC_SYMBOL = /^[A-Z0-9.^=\-]{1,24}$/;
+const HISTORY_PERIODS: Record<ChartPeriod, { interval: string; range: string }> = {
+  daily: { interval: '1d', range: '3mo' },
+  weekly: { interval: '1wk', range: '1y' },
+  monthly: { interval: '1mo', range: '5y' },
 };
 
 const YAHOO_HEADERS = {
@@ -207,7 +217,7 @@ function parseSymbols(value: unknown): string[] {
   return [...new Set(value.split(',').map((symbol) => symbol.trim()).filter(Boolean))].slice(0, 30);
 }
 
-async function respondForSymbol(symbol: string, interval: string, range: string): Promise<QuoteResponse> {
+export async function getYahooQuote(symbol: string, interval = '1d', range = '1d'): Promise<QuoteResponse> {
   const result = await fetchQuote(symbol, interval, range);
   const now = Date.now();
   return {
@@ -221,6 +231,95 @@ async function respondForSymbol(symbol: string, interval: string, range: string)
     quote: summarizeQuote(result.chart),
   };
 }
+
+export function instrumentCandidates(rawSymbol: string, market: InstrumentMarket): string[] {
+  const normalized = rawSymbol.trim().toUpperCase();
+  if (!PUBLIC_SYMBOL.test(normalized)) return [];
+  if (market === 'US') return [normalized];
+  if (normalized.endsWith('.KS') || normalized.endsWith('.KQ')) return [normalized];
+  if (!/^\d{4,6}$/.test(normalized)) return [];
+  const code = normalized.padStart(6, '0');
+  return [`${code}.KS`, `${code}.KQ`];
+}
+
+export function historicalPoints(chart: YahooChartResponse['chart']): Array<{ t: number; close: number }> {
+  const result = chart.result?.[0];
+  const timestamps = result?.timestamp ?? [];
+  const closes = result?.indicators?.quote?.[0]?.close ?? [];
+  return timestamps.flatMap((timestamp, index) => {
+    const close = closes[index];
+    return finite(timestamp) && timestamp > 0 && finite(close) && close > 0 ? [{ t: timestamp, close }] : [];
+  });
+}
+
+async function resolveInstrument(rawSymbol: string, market: InstrumentMarket, interval: string, range: string): Promise<QuoteResponse> {
+  const candidates = instrumentCandidates(rawSymbol, market);
+  if (!candidates.length) throw new Error('지원하지 않는 종목 코드입니다.');
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return await getYahooQuote(candidate, interval, range);
+    } catch (error) {
+      lastError = error;
+      if (isRateLimited(error)) break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('종목 정보를 확인할 수 없습니다.');
+}
+
+function readMarket(value: unknown): InstrumentMarket | null {
+  return value === 'US' || value === 'KR' ? value : null;
+}
+
+router.get('/instrument/:symbol', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const market = readMarket(req.query.market);
+    if (!market || !instrumentCandidates(req.params.symbol, market).length) {
+      res.status(400).json({ error: 'invalid_request', message: '유효한 종목 코드와 market(US/KR)이 필요합니다.' });
+      return;
+    }
+    const result = await resolveInstrument(req.params.symbol, market, '1d', '5d');
+    const meta = result.chart.result?.[0]?.meta ?? {};
+    const longName = typeof meta.longName === 'string' ? meta.longName.trim() : '';
+    const shortName = typeof meta.shortName === 'string' ? meta.shortName.trim() : '';
+    const name = longName || shortName;
+    if (!name) {
+      res.status(404).json({ error: 'instrument_name_unavailable', message: '시세 제공자에서 기업명을 확인하지 못했습니다.' });
+      return;
+    }
+    res.json({
+      symbol: req.params.symbol.trim().toUpperCase(), providerSymbol: result.symbol, market, name,
+      longName: longName || null, shortName: shortName || null,
+      exchangeName: typeof meta.fullExchangeName === 'string' ? meta.fullExchangeName : (typeof meta.exchangeName === 'string' ? meta.exchangeName : null),
+      currency: meta.currency === 'USD' || meta.currency === 'KRW' ? meta.currency : null,
+      source: result.source, fetchedAt: result.fetchedAt,
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/history/:symbol', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const market = readMarket(req.query.market);
+    const period = typeof req.query.period === 'string' && req.query.period in HISTORY_PERIODS ? req.query.period as ChartPeriod : null;
+    if (!market || !period || !instrumentCandidates(req.params.symbol, market).length) {
+      res.status(400).json({ error: 'invalid_request', message: 'market(US/KR)과 period(daily/weekly/monthly)가 필요합니다.' });
+      return;
+    }
+    const settings = HISTORY_PERIODS[period];
+    const result = await resolveInstrument(req.params.symbol, market, settings.interval, settings.range);
+    const points = historicalPoints(result.chart);
+    if (points.length < 2) {
+      res.status(404).json({ error: 'history_unavailable', message: '표시할 가격 이력이 충분하지 않습니다.' });
+      return;
+    }
+    res.json({
+      symbol: req.params.symbol.trim().toUpperCase(), providerSymbol: result.symbol, market, period,
+      interval: settings.interval, range: settings.range, currency: result.quote.currency,
+      source: result.source, fetchedAt: result.fetchedAt,
+      asOf: new Date(points[points.length - 1].t * 1000).toISOString(), points,
+    });
+  } catch (error) { next(error); }
+});
 
 // Batch is the preferred mobile path: one client request and a bounded,
 // server-side sequence avoids a burst of upstream calls on every dashboard.
@@ -248,7 +347,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
           continue;
         }
         try {
-          items[index] = await respondForSymbol(symbol, interval, range);
+          items[index] = await getYahooQuote(symbol, interval, range);
         } catch (error) {
           if (isRateLimited(error)) providerRateLimited = true;
           failures.push({ symbol, message: error instanceof Error ? error.message : 'quote unavailable' });
@@ -273,7 +372,7 @@ router.get('/:symbol', async (req: Request, res: Response, next: NextFunction) =
       ? req.query.range
       : '1mo';
 
-    const result = await respondForSymbol(symbol, interval, range);
+    const result = await getYahooQuote(symbol, interval, range);
     res.setHeader('X-Cache', result.source);
     res.json(result);
   } catch (err) {
