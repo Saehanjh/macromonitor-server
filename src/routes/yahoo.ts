@@ -30,7 +30,7 @@ type QuoteSession = 'regular' | 'extended';
 
 export type QuoteSummary = {
   price: number;
-  currency: 'USD' | 'KRW';
+  currency: 'USD' | 'KRW' | 'JPY';
   changePercent: number | null;
   asOf: string;
   session: QuoteSession;
@@ -146,7 +146,7 @@ export function summarizeQuote(chart: YahooChartResponse['chart']): QuoteSummary
   const regularPrice = meta.regularMarketPrice;
   const regularTime = meta.regularMarketTime;
   const currency = meta.currency;
-  if (!finite(regularPrice) || regularPrice <= 0 || !finite(regularTime) || regularTime <= 0 || (currency !== 'USD' && currency !== 'KRW')) {
+  if (!finite(regularPrice) || regularPrice <= 0 || !finite(regularTime) || regularTime <= 0 || (currency !== 'USD' && currency !== 'KRW' && currency !== 'JPY')) {
     throw new Error('시세 제공자가 완전한 가격 기준정보를 반환하지 않았습니다.');
   }
 

@@ -41,6 +41,26 @@ test('newer intraday bar is explicitly an extended-hours quote', () => {
   assert.ok(Math.abs((quote.changePercent ?? 0) - 3) < 1e-10);
 });
 
+test('USD/JPY quote accepts Yahoo JPY currency metadata', () => {
+  const quote = summarizeQuote({
+    result: [{
+      meta: {
+        currency: 'JPY',
+        regularMarketPrice: 147.25,
+        regularMarketTime: 1_789_000_000,
+        regularMarketChangePercent: 0.35,
+        chartPreviousClose: 146.74,
+      },
+      timestamp: [1_789_000_000],
+      indicators: { quote: [{ close: [147.25] }] },
+    }],
+    error: null,
+  });
+  assert.equal(quote.currency, 'JPY');
+  assert.equal(quote.price, 147.25);
+  assert.equal(quote.changePercent, 0.35);
+});
+
 test('instrument candidates preserve US symbols and resolve both Korean exchanges', () => {
   assert.deepEqual(instrumentCandidates('app', 'US'), ['APP']);
   assert.deepEqual(instrumentCandidates('357780', 'KR'), ['357780.KS', '357780.KQ']);
