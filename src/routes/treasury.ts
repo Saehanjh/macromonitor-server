@@ -1,8 +1,10 @@
+import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 
 const router = Router();
+router.use(requireRealMacroData);
 type Pt = { t: number; v: number };
 
 // ── normalized auction record ──────────────────────────────────────────
@@ -94,45 +96,6 @@ async function fetchTd(path: string, key: string): Promise<TdSecurity[]> {
   return Array.isArray(r.data) ? r.data : [];
 }
 
-// ── dummy auction generator ────────────────────────────────────────────
-const DUMMY_PLAN: Array<{ type: AuctionType; term: string; amt: number; dayOffset: number }> = [
-  { type: 'Bill', term: '4-Week', amt: 80, dayOffset: -2 },
-  { type: 'Bill', term: '8-Week', amt: 75, dayOffset: -2 },
-  { type: 'Bill', term: '13-Week', amt: 76, dayOffset: -4 },
-  { type: 'Bill', term: '26-Week', amt: 70, dayOffset: -4 },
-  { type: 'Note', term: '2-Year', amt: 69, dayOffset: -6 },
-  { type: 'Note', term: '5-Year', amt: 70, dayOffset: -5 },
-  { type: 'Note', term: '7-Year', amt: 44, dayOffset: -3 },
-  { type: 'Note', term: '10-Year', amt: 42, dayOffset: 1 },
-  { type: 'Bond', term: '30-Year', amt: 25, dayOffset: 3 },
-  { type: 'TIPS', term: '10-Year', amt: 18, dayOffset: 5 },
-  { type: 'FRN', term: '2-Year', amt: 28, dayOffset: 7 },
-  { type: 'Bill', term: '52-Week', amt: 48, dayOffset: 9 },
-];
-
-function dummyAuctions(): Auction[] {
-  const today = new Date();
-  return DUMMY_PLAN.map((p, i) => {
-    const aDate = new Date(today);
-    aDate.setDate(today.getDate() + p.dayOffset);
-    const iDate = new Date(aDate);
-    iDate.setDate(aDate.getDate() + 2);
-    const upcoming = p.dayOffset > 0;
-    return {
-      cusip: `DUMMY${String(i).padStart(4, '0')}`,
-      type: p.type,
-      term: p.term,
-      auctionDate: aDate.toISOString().slice(0, 10),
-      issueDate: iDate.toISOString().slice(0, 10),
-      offeringAmount: p.amt,
-      bidToCover: upcoming ? null : Number((2.2 + Math.random() * 0.7).toFixed(2)),
-      highYield: upcoming ? null : Number((3.8 + Math.random() * 0.9).toFixed(3)),
-      interestRate: p.type === 'Bill' ? null : Number((3.5 + Math.random() * 0.8).toFixed(3)),
-      upcoming,
-    };
-  });
-}
-
 // ── GET /auctions ──────────────────────────────────────────────────────
 router.get('/auctions', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -163,7 +126,7 @@ router.get('/auctions', async (req: Request, res: Response, next: NextFunction) 
       /* dummy fallback */
     }
 
-    if (!auctions.length) auctions = dummyAuctions();
+    if (!auctions.length) auctions = ([] as Auction[]);
     res.json({ auctions, source });
   } catch (err) {
     next(err);
@@ -191,17 +154,7 @@ async function fetchFredPoints(id: string, limit: number): Promise<Pt[]> {
     .reverse();
 }
 
-function synthWeekly(base: number, n: number, vol: number, drift = 0): Pt[] {
-  const now = Math.floor(Date.now() / 1000);
-  const week = 604800;
-  const out: Pt[] = [];
-  let v = base;
-  for (let i = n - 1; i >= 0; i--) {
-    v = Math.max(base * 0.3, v + (Math.random() - 0.5) * vol + drift);
-    out.push({ t: now - i * week, v: Number(v.toFixed(1)) });
-  }
-  return out;
-}
+
 
 // ── GET /plumbing ──────────────────────────────────────────────────────
 // WALCL/WTREGEN in $millions on FRED; convert to $B. RRPONTSYD in $B already.
@@ -211,10 +164,10 @@ router.get('/plumbing', async (_req: Request, res: Response, next: NextFunction)
     let source: 'live' | 'dummy' = 'dummy';
 
     // dummy ($B)
-    let walcl = synthWeekly(7100, N, 30, -8); // Fed balance sheet, QT drift down
-    let tga = synthWeekly(760, N, 60);
-    let rrp = synthWeekly(440, N, 40, -3);
-    let resb = synthWeekly(3300, N, 50);
+    let walcl = ([] as Pt[]); // Fed balance sheet, QT drift down
+    let tga = ([] as Pt[]);
+    let rrp = ([] as Pt[]);
+    let resb = ([] as Pt[]);
 
     if (hasFredKey()) {
       try {

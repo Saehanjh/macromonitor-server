@@ -1,9 +1,11 @@
+import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 import { zscore, pctChange } from '../services/stats';
 
 const router = Router();
+router.use(requireRealMacroData);
 
 type Level = 'ok' | 'warn' | 'danger';
 
@@ -78,6 +80,7 @@ const VERDICT: Record<Level, { verdict: string; label: string }> = {
 };
 
 interface VolMetric {
+  available?: boolean;
   key: Metric;
   label: string;
   value: number | null;
@@ -108,11 +111,23 @@ function buildMetric(
   };
 }
 
-// Dummy fallback (always available per project rule).
-const DUMMY_VOL: Record<Metric, VolMetric> = {
-  vix: { key: 'vix', label: 'VIX', value: 16.4, change: -2.1, zscore: -0.3, level: 'ok', zLevel: 'ok' },
-  move: { key: 'move', label: 'MOVE', value: 98.2, change: 1.4, zscore: 0.2, level: 'ok', zLevel: 'ok' },
+const UNAVAILABLE_VOL: Record<Metric, VolMetric> = {
+  vix: { key: 'vix', label: 'VIX', value: null, change: null, zscore: null, level: 'warn', zLevel: 'warn', available: false },
+  move: { key: 'move', label: 'MOVE', value: null, change: null, zscore: null, level: 'warn', zLevel: 'warn', available: false },
 };
+
+async function volatilitySeries(metric: Metric, range: string, interval = '1d'): Promise<Series> {
+  try {
+    const series = await fetchYahoo(SYMBOLS[metric], range, interval);
+    if (series.v.length >= 2) return series;
+  } catch { /* FRED is an independent source for VIX daily closing values. */ }
+  if (metric === 'vix' && hasFredKey()) {
+    const limit = { '1mo': 23, '3mo': 66, '6mo': 130, '1y': 260, '2y': 520 }[range] ?? 130;
+    const points = await fetchFredPoints('VIXCLS', limit);
+    return { t: points.map(p => p.t), v: points.map(p => p.v) };
+  }
+  return { t: [], v: [] };
+}
 
 router.get('/volatility', async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -121,24 +136,21 @@ router.get('/volatility', async (_req: Request, res: Response, next: NextFunctio
 
     for (const m of Object.keys(SYMBOLS) as Metric[]) {
       try {
-        const series = await fetchYahoo(SYMBOLS[m], '6mo');
+        const series = await volatilitySeries(m, '6mo');
         if (series.v.length >= 2) {
           metrics[m] = buildMetric(m, series);
           anyLive = true;
         } else {
-          metrics[m] = DUMMY_VOL[m];
+          metrics[m] = UNAVAILABLE_VOL[m];
         }
       } catch {
-        metrics[m] = DUMMY_VOL[m];
+        metrics[m] = UNAVAILABLE_VOL[m];
       }
     }
 
-    const overall = worst(
-      metrics.vix.level,
-      metrics.move.level,
-      metrics.vix.zLevel,
-      metrics.move.zLevel,
-    );
+    const available = Object.values(metrics).filter(m => m.available !== false);
+    const overall = worst(...available.flatMap(m => [m.level, m.zLevel]));
+    const partial = available.length < 2;
     const verdict = VERDICT[overall];
 
     res.setHeader('X-Cache', anyLive ? 'fresh' : 'dummy');
@@ -146,10 +158,10 @@ router.get('/volatility', async (_req: Request, res: Response, next: NextFunctio
       vix: metrics.vix,
       move: metrics.move,
       verdict: verdict.verdict,
-      verdictLabel: verdict.label,
+      verdictLabel: partial ? `${verdict.label} (일부 지표 확인 불가)` : verdict.label,
       verdictLevel: overall,
       asOf: new Date().toISOString(),
-      source: anyLive ? 'live' : 'dummy',
+      source: anyLive ? (partial ? 'partial' : 'live') : 'dummy',
     });
   } catch (err) {
     next(err);
@@ -175,70 +187,51 @@ router.get('/volatility', async (_req: Request, res: Response, next: NextFunctio
 //   credit.creRisk                 → DRCRELEXFACBS
 //   credit.cccHy                   → BAMLH0A3HYC
 //   credit.sovereignCds            → market data  [non-FRED]
-interface Indicator {
-  key: string;
-  label: string;
-  value: string;
-  unit?: string;
-  status: Level;
-  hint?: string;
-}
-interface PlumbingGroup {
-  key: string;
-  title: string;
-  status: Level;
-  indicators: Indicator[];
-}
-
-const DUMMY_PLUMBING: PlumbingGroup[] = [
-  {
-    key: 'centralBank',
-    title: '중앙은행 유동성',
-    status: 'ok',
-    indicators: [
-      { key: 'dynamicLiquidity', label: '동적 유동성 가용지수', value: '62.4', unit: 'idx', status: 'ok', hint: 'WALCL−RRP−TGA 정규화' },
-      { key: 'reserveDrain', label: '지급준비금 잠식 속도', value: '-1.8', unit: '%/4w', status: 'warn', hint: 'WRESBAL 4주 변화' },
-      { key: 'reserveBuffer', label: 'Reserves + ON RRP 버퍼', value: '3.71', unit: 'T', status: 'ok', hint: 'WRESBAL + RRP' },
-    ],
-  },
-  {
-    key: 'funding',
-    title: '단기자금시장',
-    status: 'ok',
-    indicators: [
-      { key: 'sofrIorb', label: 'SOFR – IORB', value: '+3', unit: 'bp', status: 'ok', hint: '레포 압력 스프레드' },
-      { key: 'srfUsage', label: 'SRF Usage', value: '0', unit: 'B', status: 'ok', hint: 'NY Fed (더미)' },
-      { key: 'pdNetPosition', label: 'PD Net Position', value: '+214', unit: 'B', status: 'warn', hint: 'NY Fed (더미)' },
-      { key: 'emergencyLending', label: '긴급대출 의존도', value: '낮음', status: 'ok', hint: 'WLCFLPCL' },
-    ],
-  },
-  {
-    key: 'globalDollar',
-    title: '글로벌 달러·환율',
-    status: 'warn',
-    indicators: [
-      { key: 'dxyMomentum', label: 'DXY 모멘텀', value: '+0.6', unit: '%/5d', status: 'warn', hint: 'DX-Y.NYB' },
-      { key: 'financialStress', label: '금융스트레스(STLFSI)', value: '-0.42', status: 'ok', hint: 'STLFSI4' },
-      { key: 'yenCarry', label: '엔캐리 청산 리스크', value: '경계', status: 'warn', hint: 'USD/JPY 변동성' },
-      { key: 'custodyFima', label: 'Custody & FIMA', value: '안정', status: 'ok', hint: '커스터디 보유' },
-    ],
-  },
-  {
-    key: 'credit',
-    title: '신용·실물 리스크',
-    status: 'ok',
-    indicators: [
-      { key: 'sloos', label: 'SLOOS(C&I 태도)', value: '+8.4', unit: 'net%', status: 'warn', hint: 'DRTSCILM' },
-      { key: 'creRisk', label: 'CRE Risk(연체율)', value: '1.42', unit: '%', status: 'warn', hint: 'DRCRELEXFACBS' },
-      { key: 'cccHy', label: 'CCC HY OAS', value: '7.18', unit: '%', status: 'ok', hint: 'BAMLH0A3HYC' },
-      { key: 'sovereignCds', label: 'Sovereign CDS', value: '안정', status: 'ok', hint: '시장 데이터(더미)' },
-    ],
-  },
-];
-
-router.get('/plumbing', (_req: Request, res: Response) => {
-  // All-dummy for now; structure matches the future FRED-wired payload.
-  res.json({ groups: DUMMY_PLUMBING, source: 'dummy' });
+router.get('/plumbing', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!hasFredKey()) {
+      res.status(503).json({ error: 'fred_key_missing', message: '서버에 FRED API 키를 설정해야 실제 유동성 지표를 확인할 수 있습니다.' });
+      return;
+    }
+    const ids = ['WALCL', 'WTREGEN', 'RRPONTSYD', 'WRESBAL', 'SOFR', 'IORB', 'WLCFLPCL', 'STLFSI4', 'DRTSCILM', 'DRCRELEXFACBS', 'BAMLH0A3HYC'];
+    const entries = await Promise.all(ids.map(async id => [id, await fetchFredPoints(id, 10).catch(() => [] as Pt[])] as const));
+    const series = Object.fromEntries(entries);
+    const latest = (id: string): number | null => series[id]?.at(-1)?.v ?? null;
+    let availableCount = 0;
+    const indicator = (key: string, label: string, value: number | null, unit: string, hint: string, status: Level = 'ok') => {
+      const available = value != null && Number.isFinite(value);
+      if (available) availableCount++;
+      return { key, label, value: available ? value.toFixed(2) : '확인 불가', available, unit, status: available ? status : 'warn' as Level, hint: available ? hint : `${hint} · 실제 데이터 확인 불가` };
+    };
+    const w = latest('WALCL'), t = latest('WTREGEN'), r = latest('RRPONTSYD'), b = latest('WRESBAL');
+    const prevB = series.WRESBAL?.at(-5)?.v ?? null;
+    const reserveChange = b != null && prevB != null && prevB !== 0 ? (b / prevB - 1) * 100 : null;
+    const sofr = latest('SOFR'), iorb = latest('IORB');
+    const spread = sofr != null && iorb != null ? (sofr - iorb) * 100 : null;
+    const groups = [
+      { key: 'centralBank', title: '중앙은행 유동성', indicators: [
+        indicator('dynamicLiquidity', '순유동성', w != null && t != null && r != null ? w / 1000 - t / 1000 - r : null, 'B', 'FRED WALCL−WTREGEN−RRPONTSYD · 최근 발표치'),
+        indicator('reserveDrain', '지급준비금 4주 변화', reserveChange, '%/4w', 'FRED WRESBAL', reserveChange != null && reserveChange < -2 ? 'warn' : 'ok'),
+        indicator('reserveBuffer', 'Reserves + ON RRP 버퍼', b != null && r != null ? b / 1000 + r : null, 'B', 'FRED WRESBAL + RRPONTSYD'),
+      ] },
+      { key: 'funding', title: '단기자금시장', indicators: [
+        indicator('sofrIorb', 'SOFR – IORB', spread, 'bp', 'FRED SOFR−IORB', spread != null && spread > 10 ? 'warn' : 'ok'),
+        indicator('emergencyLending', 'Primary Credit 잔액', latest('WLCFLPCL') == null ? null : latest('WLCFLPCL')! / 1000, 'B', 'FRED WLCFLPCL'),
+        indicator('srfUsage', 'SRF Usage', null, 'B', 'NY Fed 제공처 미연결'),
+        indicator('pdNetPosition', 'PD Net Position', null, 'B', 'NY Fed 제공처 미연결'),
+      ] },
+      { key: 'globalDollar', title: '글로벌 달러·환율', indicators: [
+        indicator('financialStress', '금융스트레스(STLFSI)', latest('STLFSI4'), '', 'FRED STLFSI4', (latest('STLFSI4') ?? 0) > 0 ? 'warn' : 'ok'),
+      ] },
+      { key: 'credit', title: '신용·실물 리스크', indicators: [
+        indicator('sloos', 'SLOOS(C&I 대출기준 강화)', latest('DRTSCILM'), 'net%', 'FRED DRTSCILM'),
+        indicator('creRisk', 'CRE 연체율', latest('DRCRELEXFACBS'), '%', 'FRED DRCRELEXFACBS'),
+        indicator('cccHy', 'CCC HY OAS', latest('BAMLH0A3HYC'), '%', 'FRED BAMLH0A3HYC'),
+        indicator('sovereignCds', 'Sovereign CDS', null, '', '별도 시장 데이터 제공처 미연결'),
+      ] },
+    ].map(group => ({ ...group, status: worst(...group.indicators.map(i => i.status)) }));
+    res.json({ groups: availableCount ? groups : [], source: availableCount ? 'partial' : 'dummy', coverage: { available: availableCount, total: groups.reduce((sum, group) => sum + group.indicators.length, 0) } });
+  } catch (error) { next(error); }
 });
 
 // ── History (라인차트 데이터) ──────────────────────────────────────────
@@ -250,17 +243,7 @@ const RANGE_MAP: Record<string, { range: string; interval: string }> = {
   '2Y': { range: '2y', interval: '1wk' },
 };
 
-function synthSeries(base: number, points: number, vol: number): Array<{ t: number; v: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const day = 86400;
-  const out: Array<{ t: number; v: number }> = [];
-  let v = base;
-  for (let i = points - 1; i >= 0; i--) {
-    v = Math.max(base * 0.4, v + (Math.random() - 0.5) * vol);
-    out.push({ t: now - i * day, v: Number(v.toFixed(2)) });
-  }
-  return out;
-}
+
 
 router.get('/history/:metric', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -273,7 +256,7 @@ router.get('/history/:metric', async (req: Request, res: Response, next: NextFun
     const { range, interval } = RANGE_MAP[rangeKey];
 
     try {
-      const series = await fetchYahoo(SYMBOLS[metric], range, interval);
+      const series = await volatilitySeries(metric, range, interval);
       if (series.v.length > 0) {
         const points = series.t.map((t, i) => ({ t, v: Number(series.v[i].toFixed(2)) }));
         res.setHeader('X-Cache', 'fresh');
@@ -281,14 +264,14 @@ router.get('/history/:metric', async (req: Request, res: Response, next: NextFun
         return;
       }
     } catch {
-      /* fall through to dummy */
+      /* input remains unavailable */
     }
 
     const base = metric === 'vix' ? 16 : 95;
     const vol = metric === 'vix' ? 1.6 : 6;
     const count = { '1M': 22, '3M': 64, '6M': 128, '1Y': 252, '2Y': 104 }[rangeKey] ?? 64;
     res.setHeader('X-Cache', 'dummy');
-    res.json({ metric, range: rangeKey, points: synthSeries(base, count, vol), source: 'dummy' });
+    res.json({ metric, range: rangeKey, points: ([] as Array<{ t: number; v: number }>), source: 'dummy' });
   } catch (err) {
     next(err);
   }
@@ -369,51 +352,33 @@ async function fetchFredPoints(seriesId: string, limit: number): Promise<Array<{
 }
 
 // ── synthetic dummy helpers ────────────────────────────────────────────
-function synthPoints(base: number, n: number, vol: number, drift = 0): Array<{ t: number; v: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const day = 86400;
-  const out: Array<{ t: number; v: number }> = [];
-  let v = base;
-  for (let i = n - 1; i >= 0; i--) {
-    v = Math.max(base * 0.3, v + (Math.random() - 0.5) * vol + drift);
-    out.push({ t: now - i * day, v: Number(v.toFixed(3)) });
-  }
-  return out;
-}
-function synthArr(base: number, n: number, vol: number): number[] {
-  const out: number[] = [];
-  let v = base;
-  for (let i = 0; i < n; i++) {
-    v = Math.max(base * 0.3, v + (Math.random() - 0.5) * vol);
-    out.push(Number(v.toFixed(2)));
-  }
-  return out;
-}
+
+
 
 // ── /capital-migration ─────────────────────────────────────────────────
 // TODO(FRED): DFII10 (TIPS 10Y real) + MMMFFAQ027S (MMF total assets).
 router.get('/capital-migration', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     let source: 'live' | 'dummy' = 'dummy';
-    let tips = synthPoints(1.9, 120, 0.05);
-    let mmf = synthPoints(5900, 24, 30, 12);
-    let vix = 16.4;
+    let tips = ([] as Array<{ t: number; v: number }>);
+    let mmf = ([] as Array<{ t: number; v: number }>);
+    let vix = Number.NaN;
 
     if (hasFredKey()) {
       try {
         const t = await fetchFredPoints('DFII10', 200);
         if (t.length) { tips = t; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
       try {
         const m = await fetchFredPoints('MMMFFAQ027S', 40);
         if (m.length) { mmf = m; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
     }
 
     try {
       const v = await fetchYahooFull('^VIX', '5d');
       if (v.closes.length) vix = Number(v.closes[v.closes.length - 1].toFixed(2));
-    } catch { /* keep dummy vix */ }
+    } catch { /* input remains unavailable */ }
 
     res.json({
       tips: { points: tips },
@@ -442,12 +407,12 @@ const SECTORS: Array<{ symbol: string; name: string }> = [
   { symbol: 'XLC', name: '커뮤니케이션' },
 ];
 
-function dummySector(symbol: string, name: string) {
+function unavailableSector(symbol: string, name: string) {
   return {
     symbol,
     name,
-    closes: synthArr(100 + (symbol.charCodeAt(2) % 40), 12, 1.4),
-    volumes: synthArr(8_000_000, 12, 2_500_000),
+    closes: ([] as number[]),
+    volumes: ([] as number[]),
   };
 }
 
@@ -468,7 +433,7 @@ router.get('/sectors', async (_req: Request, res: Response, next: NextFunction) 
             };
           }
         } catch { /* fall through */ }
-        return dummySector(s.symbol, s.name);
+        return unavailableSector(s.symbol, s.name);
       }),
     );
     res.json({ sectors, source: anyLive ? 'live' : 'dummy' });
@@ -489,7 +454,7 @@ router.get('/leverage', async (_req: Request, res: Response, next: NextFunction)
           return { closes: f.closes.slice(-12), volumes: f.volumes.slice(-12) };
         }
       } catch { /* fall through */ }
-      return { closes: synthArr(closeBase, 12, closeBase * 0.03), volumes: synthArr(volBase, 12, volBase * 0.4) };
+      return { closes: ([] as number[]), volumes: ([] as number[]) };
     };
 
     const [tqqq, sqqq, uvxy] = await Promise.all([
@@ -541,9 +506,9 @@ function computeNetLiquidity(walcl: Pt[], tga: Pt[], rrp: Pt[]): Pt[] {
 router.get('/liquidity-flow', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     let source: 'live' | 'dummy' = 'dummy';
-    let netLiquidity: Pt[] = synthPoints(5900, 52, 60, -8);
-    let components = { walcl: 7_100_000, tga: 760_000, rrp: 420 }; // raw FRED units ($M,$M,$B)
-    let sp500: Pt[] = synthPoints(5600, 52, 120, 6);
+    let netLiquidity: Pt[] = ([] as Array<{ t: number; v: number }>);
+    let components = { walcl: Number.NaN, tga: Number.NaN, rrp: Number.NaN }; // raw FRED units ($M,$M,$B)
+    let sp500: Pt[] = ([] as Array<{ t: number; v: number }>);
 
     if (hasFredKey()) {
       try {
@@ -564,7 +529,7 @@ router.get('/liquidity-flow', async (_req: Request, res: Response, next: NextFun
             source = 'live';
           }
         }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
     }
 
     try {
@@ -572,7 +537,14 @@ router.get('/liquidity-flow', async (_req: Request, res: Response, next: NextFun
       if (g.closes.length) {
         sp500 = g.t.map((t, i) => ({ t, v: Number(g.closes[i].toFixed(2)) })).slice(-52);
       }
-    } catch { /* keep dummy sp500 */ }
+    } catch { /* input remains unavailable */ }
+
+    if (!sp500.length && hasFredKey()) {
+      const daily = await fetchFredPoints('SP500', 270).catch(() => [] as Pt[]);
+      const weekly = new Map<number, Pt>();
+      daily.forEach(point => weekly.set(Math.floor(point.t / 604800), point));
+      sp500 = [...weekly.values()].slice(-52);
+    }
 
     res.json({
       netLiquidity: { points: netLiquidity },
@@ -589,19 +561,19 @@ router.get('/liquidity-flow', async (_req: Request, res: Response, next: NextFun
 router.get('/mmf-deposits', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     let source: 'live' | 'dummy' = 'dummy';
-    let mmfRetail: Pt[] = synthPoints(2350, 16, 20, 6);
+    let mmfRetail: Pt[] = ([] as Array<{ t: number; v: number }>);
     // institutional MMF: weekly FRED series (WIMFSL/IMFSL) were discontinued in 2021.
     // Derive it from real data: total MMF (MMMFFAQ027S) − retail (RMFSL).
-    let mmfInst: Pt[] = synthPoints(4050, 16, 25, 5);
-    let instNote = 'FRED 미연결(더미)';
-    let deposits: Pt[] = synthPoints(17400, 16, 40, -5);
+    let mmfInst: Pt[] = ([] as Array<{ t: number; v: number }>);
+    let instNote = 'FRED 데이터를 가져오지 못했습니다.';
+    let deposits: Pt[] = ([] as Array<{ t: number; v: number }>);
 
     if (hasFredKey()) {
       let retail: Pt[] = [];
       try {
         retail = await fetchFredPoints('RMFSL', 18); // retail money funds, $B, monthly
         if (retail.length) { mmfRetail = retail; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
 
       try {
         // MMMFFAQ027S = total MMF financial assets, $millions, quarterly → $B
@@ -621,12 +593,12 @@ router.get('/mmf-deposits', async (_req: Request, res: Response, next: NextFunct
             source = 'live';
           }
         }
-      } catch { /* keep dummy institutional */ }
+      } catch { /* input remains unavailable */ }
 
       try {
         const d = await fetchFredPoints('DPSACBW027SBOG', 18);
         if (d.length) { deposits = d; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
     }
 
     res.json({
@@ -644,18 +616,18 @@ router.get('/mmf-deposits', async (_req: Request, res: Response, next: NextFunct
 router.get('/repo-phase', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     let source: 'live' | 'dummy' = 'dummy';
-    let rrp: Pt[] = synthPoints(420, 20, 12, -3);
-    let sofr: Pt[] = synthPoints(5.31, 30, 0.03);
+    let rrp: Pt[] = ([] as Array<{ t: number; v: number }>);
+    let sofr: Pt[] = ([] as Array<{ t: number; v: number }>);
 
     if (hasFredKey()) {
       try {
         const r = await fetchFredPoints('RRPONTSYD', 25);
         if (r.length) { rrp = r; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
       try {
         const s = await fetchFredPoints('SOFR', 35);
         if (s.length) { sofr = s; source = 'live'; }
-      } catch { /* keep dummy */ }
+      } catch { /* input remains unavailable */ }
     }
 
     res.json({ rrp: { points: rrp }, sofr: { points: sofr }, source });
@@ -673,9 +645,7 @@ const RATE_RANGE_LIMIT: Record<string, number> = {
 const RATE_BASE: Record<string, number> = {
   DGS3MO: 5.3, DGS2: 4.7, DGS5: 4.3, DGS10: 4.25, DGS30: 4.45,
 };
-function dummyRate(seriesId: string, n: number): Pt[] {
-  return synthPoints(RATE_BASE[seriesId] ?? 4.3, Math.min(n, 260), 0.03);
-}
+function unavailableRate(): Pt[] { return []; }
 
 router.get('/rates', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -702,12 +672,12 @@ router.get('/rates', async (req: Request, res: Response, next: NextFunction) => 
           series[s] = pts;
           anyLive = true;
         } else {
-          series[s] = dummyRate(s, limit);
+          series[s] = unavailableRate();
         }
       }
       source = anyLive ? 'live' : 'dummy';
     } else {
-      for (const s of RATE_SERIES) series[s] = dummyRate(s, limit);
+      for (const s of RATE_SERIES) series[s] = unavailableRate();
     }
 
     res.json({ range, series, source });
@@ -727,11 +697,13 @@ function levelForIg(v: number): Level {
   return v < 1.3 ? 'ok' : v < 2 ? 'warn' : 'danger';
 }
 function creditMetric(points: Pt[], kind: 'hy' | 'ig') {
-  const v = points.length ? points[points.length - 1].v : 0;
+  if (!points.length) return { value: null, change: null, available: false, level: 'warn' as Level, points: [] as Pt[] };
+  const v = points[points.length - 1].v;
   const prev = points.length > 5 ? points[points.length - 6].v : v;
   return {
     value: Number(v.toFixed(2)),
     change: Number((v - prev).toFixed(2)), // 5-obs change, in percentage points
+    available: true,
     level: kind === 'hy' ? levelForHy(v) : levelForIg(v),
     points: points.slice(-130),
   };
@@ -739,8 +711,8 @@ function creditMetric(points: Pt[], kind: 'hy' | 'ig') {
 
 router.get('/credit', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    let hyPts = synthPoints(3.4, 130, 0.04);
-    let igPts = synthPoints(0.95, 130, 0.012);
+    let hyPts = ([] as Array<{ t: number; v: number }>);
+    let igPts = ([] as Array<{ t: number; v: number }>);
     let source: 'live' | 'dummy' = 'dummy';
 
     if (hasFredKey()) {

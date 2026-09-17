@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildMacroDrivers, buildRisk, buildScenarios, MarketIndicator } from './marketBriefing';
+import { buildDailyView, buildMacroDrivers, buildRisk, buildScenarios, coinbaseBitcoin, MarketIndicator } from './marketBriefing';
+
+test('Coinbase uses true 24h stats, keeps cached time and discloses received-time basis', () => {
+  const quote = coinbaseBitcoin({ data: { last: '102000', open: '100000' }, source: 'cache', fetchedAt: Date.now() - 30_000 });
+  assert.ok(Math.abs(quote.changePercent! - 2) < 0.00001);
+  assert.equal(quote.changeBasis, 'rolling-24h');
+  assert.equal(quote.provider, 'Coinbase Exchange');
+  assert.equal(quote.asOfBasis, 'received');
+  assert.equal(quote.asOf, quote.fetchedAt);
+  assert.equal(quote.source, 'cache');
+});
+
+test('Coinbase missing opening price is not fabricated and stale data stays stale', () => {
+  const quote = coinbaseBitcoin({ data: { last: '102000' }, source: 'stale', fetchedAt: Date.now() - 3600_000 });
+  assert.equal(quote.changePercent, null);
+  assert.equal(quote.freshness, 'stale');
+  assert.throws(() => coinbaseBitcoin({ data: { last: '0', open: '100' }, source: 'fresh', fetchedAt: Date.now() }));
+});
 
 function indicator(key: MarketIndicator['key'], value: number | null, changePercent: number | null = null): MarketIndicator {
   const labels: Record<MarketIndicator['key'], string> = { btc: '비트코인', usdjpy: '달러/엔', usdkrw: '원/달러', us10y: '10년물', us30y: '30년물' };
@@ -45,4 +62,25 @@ test('BTC price without a published 24-hour comparison is shown but does not dil
   ]);
   assert.equal(risk.score, 100);
   assert.deepEqual(risk.evidenceKeys, ['us10y']);
+});
+
+test('daily view remains useful and evidence-backed when four of five indicators are available', () => {
+  const view = buildDailyView([
+    indicator('btc', null),
+    indicator('usdjpy', 148.2),
+    indicator('usdkrw', 1362),
+    indicator('us10y', 4.3),
+    indicator('us30y', 4.5),
+  ]);
+  assert.equal(view.evidenceKeys.length, 4);
+  assert.match(view.interpretation, /10년물 4\.30%/);
+  assert.match(view.interpretation, /원\/달러 1,362/);
+  assert.ok(view.checklist.length >= 2);
+  assert.ok(!view.evidenceKeys.includes('btc'));
+});
+
+test('daily view does not invent market facts when every provider is unavailable', () => {
+  const view = buildDailyView([indicator('btc', null), indicator('us10y', null)]);
+  assert.deepEqual(view.evidenceKeys, []);
+  assert.match(view.headline, /확인된 시장지표가 없습니다/);
 });

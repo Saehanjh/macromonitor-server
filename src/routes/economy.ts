@@ -1,8 +1,10 @@
+import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 
 const router = Router();
+router.use(requireRealMacroData);
 type Pt = { t: number; v: number };
 
 // ── upstream helpers ───────────────────────────────────────────────────
@@ -38,38 +40,9 @@ async function fetchFredPoints(seriesId: string, limit: number): Promise<Pt[]> {
     .reverse();
 }
 
-function synthCloses(base: number, n: number, vol: number, drift = 0): number[] {
-  const out: number[] = [];
-  let v = base;
-  for (let i = 0; i < n; i++) {
-    v = Math.max(base * 0.2, v + (Math.random() - 0.5) * vol + drift);
-    out.push(Number(v.toFixed(3)));
-  }
-  return out;
-}
-function synthMonthly(base: number, n: number, mom: number): Pt[] {
-  // monthly index rising ~`mom` fraction per month (for ~YoY*12 dummy)
-  const now = Math.floor(Date.now() / 1000);
-  const month = 2_629_800;
-  const out: Pt[] = [];
-  let v = base / (1 + mom) ** n;
-  for (let i = n - 1; i >= 0; i--) {
-    v = v * (1 + mom + (Math.random() - 0.5) * mom * 0.6);
-    out.push({ t: now - i * month, v: Number(v.toFixed(3)) });
-  }
-  return out;
-}
-function synthDaily(base: number, n: number, vol: number): Pt[] {
-  const now = Math.floor(Date.now() / 1000);
-  const day = 86400;
-  const out: Pt[] = [];
-  let v = base;
-  for (let i = n - 1; i >= 0; i--) {
-    v = Math.max(0.1, v + (Math.random() - 0.5) * vol);
-    out.push({ t: now - i * day, v: Number(v.toFixed(3)) });
-  }
-  return out;
-}
+
+
+
 
 // ── /commodities (12 Yahoo futures) ────────────────────────────────────
 const COMMODITIES: Array<{ symbol: string; name: string; base: number; vol: number }> = [
@@ -99,7 +72,7 @@ router.get('/commodities', async (_req: Request, res: Response, next: NextFuncti
             return { symbol: c.symbol, name: c.name, closes: closes.slice(-25) };
           }
         } catch { /* fall through */ }
-        return { symbol: c.symbol, name: c.name, closes: synthCloses(c.base, 25, c.vol, (Math.random() - 0.5) * c.vol * 0.3) };
+        return { symbol: c.symbol, name: c.name, closes: ([] as number[]) };
       }),
     );
     res.json({ commodities, source: anyLive ? 'live' : 'dummy' });
@@ -139,11 +112,11 @@ router.get('/inflation', async (_req: Request, res: Response, next: NextFunction
           series[key] = { points: pts };
           anyLive = true;
         } else {
-          series[key] = { points: synthMonthly(def.base, 16, def.mom) };
+          series[key] = { points: ([] as Pt[]) };
         }
       }
     } else {
-      for (const s of INFLATION) series[s.key] = { points: synthMonthly(s.base, 16, s.mom) };
+      for (const s of INFLATION) series[s.key] = { points: ([] as Pt[]) };
     }
 
     res.json({ series, source: anyLive ? 'live' : 'dummy' });
@@ -156,14 +129,14 @@ router.get('/inflation', async (_req: Request, res: Response, next: NextFunction
 router.get('/expectations', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     let source: 'live' | 'dummy' = 'dummy';
-    let bei = synthDaily(2.31, 70, 0.01);
-    let fwd = synthDaily(2.38, 70, 0.01);
-    let mich = synthMonthly(3.0, 14, 0).map((p) => ({ t: p.t, v: Number((2.8 + Math.random() * 0.5).toFixed(2)) }));
+    let bei = ([] as Pt[]);
+    let fwd = ([] as Pt[]);
+    let mich: Pt[] = [];
 
     if (hasFredKey()) {
-      try { const b = await fetchFredPoints('T10YIE', 70); if (b.length) { bei = b; source = 'live'; } } catch { /* keep dummy */ }
-      try { const f = await fetchFredPoints('T5YIFR', 70); if (f.length) { fwd = f; source = 'live'; } } catch { /* keep dummy */ }
-      try { const m = await fetchFredPoints('MICH', 14); if (m.length) { mich = m; source = 'live'; } } catch { /* keep dummy */ }
+      try { const b = await fetchFredPoints('T10YIE', 70); if (b.length) { bei = b; source = 'live'; } } catch { /* input remains unavailable */ }
+      try { const f = await fetchFredPoints('T5YIFR', 70); if (f.length) { fwd = f; source = 'live'; } } catch { /* input remains unavailable */ }
+      try { const m = await fetchFredPoints('MICH', 14); if (m.length) { mich = m; source = 'live'; } } catch { /* input remains unavailable */ }
     }
 
     res.json({ bei: { points: bei }, fwd: { points: fwd }, mich: { points: mich }, source });
@@ -202,7 +175,7 @@ router.get('/corporate', async (_req: Request, res: Response, next: NextFunction
   try {
     let anyLive = false;
 
-    let gdpNow = 2.4;
+    let gdpNow = Number.NaN;
     if (hasFredKey()) {
       const g = await latestVal('GDPNOW');
       if (g != null) { gdpNow = g; anyLive = true; }
@@ -215,7 +188,7 @@ router.get('/corporate', async (_req: Request, res: Response, next: NextFunction
           if (hasFredKey()) v = await latestVal(d.id);
           const live = v != null;
           if (live) anyLive = true;
-          return { name: d.name, value: Number((live ? v! : d.base).toFixed(1)), live };
+          return { name: d.name, value: Number((live ? v! : Number.NaN).toFixed(1)), live };
         }),
       );
       const avg = components.reduce((a, c) => a + c.value, 0) / components.length;
@@ -254,7 +227,7 @@ router.get('/labor', async (_req: Request, res: Response, next: NextFunction) =>
         if (points.length >= 2) {
           anyLive = true;
         } else {
-          points = synthDaily(d.base, 14, d.vol);
+          points = ([] as Pt[]);
         }
         return { key: d.key, id: d.id, name: d.name, points };
       }),
@@ -289,7 +262,7 @@ router.get('/consumer', async (_req: Request, res: Response, next: NextFunction)
         if (points.length >= 2) {
           anyLive = true;
         } else {
-          points = d.id === 'DRCCLACBS' ? synthMonthly(d.base, d.n, 0.004) : synthDaily(d.base, d.n, d.vol);
+          points = d.id === 'DRCCLACBS' ? ([] as Pt[]) : ([] as Pt[]);
         }
         out[d.key] = { points };
       }),

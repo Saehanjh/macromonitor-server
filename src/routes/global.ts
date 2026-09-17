@@ -1,8 +1,10 @@
+import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 
 const router = Router();
+router.use(requireRealMacroData);
 type Pt = { t: number; v: number };
 
 // ── upstream helpers ───────────────────────────────────────────────────
@@ -54,17 +56,7 @@ const RANGE: Record<string, { yr: string; yi: string; fl: number; n: number }> =
 };
 const rangeKey = (q: unknown): string => (typeof q === 'string' && RANGE[q] ? q : '1Y');
 
-function synthDaily(base: number, n: number, vol: number, drift = 0): Pt[] {
-  const now = Math.floor(Date.now() / 1000);
-  const day = 86400;
-  const out: Pt[] = [];
-  let v = base;
-  for (let i = n - 1; i >= 0; i--) {
-    v = Math.max(base * 0.2, v + (Math.random() - 0.5) * vol + drift);
-    out.push({ t: now - i * day, v: Number(v.toFixed(4)) });
-  }
-  return out;
-}
+
 
 // ── /dollar (DXY vs Broad Dollar + SPY overlay) ────────────────────────
 router.get('/dollar', async (req: Request, res: Response, next: NextFunction) => {
@@ -73,9 +65,9 @@ router.get('/dollar', async (req: Request, res: Response, next: NextFunction) =>
     const r = RANGE[rk];
     let source: 'live' | 'dummy' = 'dummy';
 
-    let dxy = synthDaily(104, r.n, 0.3);
-    let broad = synthDaily(121, r.n, 0.25);
-    let spy = synthDaily(560, r.n, 4);
+    let dxy = ([] as Pt[]);
+    let broad = ([] as Pt[]);
+    let spy = ([] as Pt[]);
 
     try { const d = await fetchYahooPoints('DX-Y.NYB', r.yr, r.yi); if (d.length) { dxy = d; source = 'live'; } } catch { /* dummy */ }
     try { const s = await fetchYahooPoints('SPY', r.yr, r.yi); if (s.length) spy = s; } catch { /* dummy */ }
@@ -108,8 +100,8 @@ async function pairHandler(
     const r = RANGE[rk];
     let source: 'live' | 'dummy' = 'dummy';
 
-    let aPts = synthDaily(aBase, r.n, aVol);
-    let bPts = synthDaily(bBase, r.n, bVol);
+    let aPts = ([] as Pt[]);
+    let bPts = ([] as Pt[]);
 
     try { const a = await fetchYahooPoints(aSym, r.yr, r.yi); if (a.length) { aPts = a; source = 'live'; } } catch { /* dummy */ }
     try { const b = await fetchYahooPoints(bSym, r.yr, r.yi); if (b.length) { bPts = b; source = 'live'; } } catch { /* dummy */ }

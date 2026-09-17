@@ -70,30 +70,6 @@ async function treasuryEventsForDate(date: string): Promise<CalendarEvent[]> {
   return out;
 }
 
-// ── curated US macro release schedule (recurring, by weekday) ──────────
-function curatedForDate(dateStr: string): CalendarEvent[] {
-  const dow = new Date(`${dateStr}T00:00:00Z`).getUTCDay();
-  const pool: CalendarEvent[][] = [
-    [], // Sun
-    [{ id: 'c-mon-1', time: '08:30', country: 'US', title: 'Chicago Fed National Activity', impact: 'low' }],
-    [{ id: 'c-tue-1', time: '10:00', country: 'US', title: 'Consumer Confidence', impact: 'high' }],
-    [
-      { id: 'c-wed-1', time: '08:15', country: 'US', title: 'ADP 고용보고서', impact: 'medium' },
-      { id: 'c-wed-2', time: '10:30', country: 'US', title: 'EIA 원유 재고', impact: 'medium' },
-    ],
-    [
-      { id: 'c-thu-1', time: '08:30', country: 'US', title: 'Initial Jobless Claims', impact: 'medium' },
-      { id: 'c-thu-2', time: '08:30', country: 'US', title: 'Core PCE / GDP (주별 변동)', impact: 'high' },
-    ],
-    [
-      { id: 'c-fri-1', time: '08:30', country: 'US', title: 'Nonfarm Payrolls / CPI (주별 변동)', impact: 'high' },
-      { id: 'c-fri-2', time: '10:00', country: 'US', title: 'ISM PMI (월초)', impact: 'high' },
-    ],
-    [], // Sat
-  ];
-  return pool[dow] ?? [];
-}
-
 router.get('/', async (req, res, next) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
@@ -107,12 +83,13 @@ router.get('/', async (req, res, next) => {
     try {
       treasuryEvents = await treasuryEventsForDate(date);
     } catch {
-      /* fall back to curated only */
+      res.status(503).json({ error: 'calendar_unavailable', message: '국채 입찰 일정을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.' });
+      return;
     }
 
-    const events = [...treasuryEvents, ...curatedForDate(date)].sort((a, b) => a.time.localeCompare(b.time));
+    const events = treasuryEvents.sort((a, b) => a.time.localeCompare(b.time));
     // "live" when we actually pulled real Treasury auction data for the date
-    const source = treasuryEvents.length > 0 ? 'live' : 'partial';
+    const source = 'live';
 
     res.json({ date, events, source });
   } catch (err) {

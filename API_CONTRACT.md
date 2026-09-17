@@ -10,6 +10,12 @@ server mode must treat `source: "dummy"` as unavailable live data.
 - `GET /api/fred/:seriesId?start&end&limit&sort`
 - `GET /api/yahoo/:symbol?interval&range`
 - `GET /api/yahoo?symbols=NVDA,005930.KS&interval&range` (preferred mobile batch endpoint; at most 30 symbols)
+- `GET /api/yahoo/instrument/:symbol?market=US|KR` (provider company name and resolved exchange symbol)
+- `GET /api/yahoo/history/:symbol?market=US|KR&period=daily|weekly|monthly` (validated real close series; Korean numeric codes try KOSPI then KOSDAQ)
+- `GET /api/morning-briefing` returns BTC/USD, USD/JPY, USD/KRW, US 10Y and
+  US 30Y with provider, observation time, fetch time, cache/stale status,
+  partial-data coverage, evidence-backed macro drivers and rule-based scenarios.
+  Missing providers remain explicit `unavailable`; the route never invents a value.
 - `GET /api/coingecko/{simple/price,coins/markets,coins/:id/market_chart,global}`
 - `GET /api/defillama/{stablecoins,stablecoincharts/all,tvl/:protocol,protocols}`
 - `GET /api/news?category&window`, `GET /api/calendar?date`

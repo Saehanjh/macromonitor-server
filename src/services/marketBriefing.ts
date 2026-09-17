@@ -13,7 +13,9 @@ export interface MarketIndicator {
   changePercent: number | null;
   asOf: string | null;
   fetchedAt: string | null;
-  provider: 'CoinGecko' | 'Yahoo Finance' | 'FRED';
+  provider: 'Coinbase Exchange' | 'CoinGecko' | 'Yahoo Finance' | 'FRED';
+  changeBasis?: 'rolling-24h' | 'previous-close';
+  asOfBasis?: 'provider' | 'received';
   source: 'fresh' | 'cache' | 'stale' | 'unavailable';
   freshness: DataFreshness;
   message?: string;
@@ -23,6 +25,12 @@ export interface MarketBriefing {
   generatedAt: string;
   coverage: { status: 'complete' | 'partial' | 'failed'; requested: number; succeeded: number; failed: number };
   indicators: MarketIndicator[];
+  dailyView: {
+    headline: string;
+    interpretation: string;
+    checklist: string[];
+    evidenceKeys: MarketIndicatorKey[];
+  };
   macroDrivers: Array<{ tone: 'positive' | 'neutral' | 'caution'; text: string; evidenceKeys: MarketIndicatorKey[] }>;
   scenarios: Array<{ tone: 'positive' | 'neutral' | 'caution'; title: string; text: string; evidenceKeys: MarketIndicatorKey[] }>;
   risk: { score: number | null; level: 'low' | 'moderate' | 'high' | 'unavailable'; method: string; evidenceKeys: MarketIndicatorKey[] };
@@ -38,11 +46,15 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 const iso = (millis: number): string => new Date(millis).toISOString();
 
 function failed(key: MarketIndicatorKey, label: string, unit: MarketIndicator['unit'], provider: MarketIndicator['provider'], error: unknown): MarketIndicator {
+  const rawMessage = error instanceof Error ? error.message : '';
+  const providerLimited = /\b429\b|rate.?limit|too many requests|요청.*제한/i.test(rawMessage);
   return {
     key, label, unit, provider,
     value: null, changePercent: null, asOf: null, fetchedAt: null,
     source: 'unavailable', freshness: 'unavailable',
-    message: error instanceof Error ? error.message : '데이터를 확인할 수 없습니다.',
+    message: providerLimited
+      ? `${label} 제공처가 요청을 잠시 제한했습니다. 잠시 후 다시 확인해 주세요.`
+      : `${label} 데이터를 현재 확인할 수 없습니다. 잠시 후 다시 확인해 주세요.`,
   };
 }
 
@@ -50,13 +62,52 @@ function sourceStatus(source: ProxyResult<unknown>['source'], asOfMillis: number
   return source === 'stale' || Date.now() - asOfMillis > maxObservationAgeMs ? 'stale' : 'fresh';
 }
 
+export function coinbaseBitcoin(result: ProxyResult<{ last?: string; open?: string }>): MarketIndicator {
+  const price = Number(result.data.last);
+  const open = Number(result.data.open);
+  if (!finite(price) || price <= 0) throw new Error('Coinbase BTC 가격 누락');
+  return {
+    key: 'btc', label: '비트코인', value: price, unit: 'USD',
+    changePercent: finite(open) && open > 0 ? (price / open - 1) * 100 : null,
+    changeBasis: 'rolling-24h', asOfBasis: 'received',
+    asOf: iso(result.fetchedAt), fetchedAt: iso(result.fetchedAt),
+    provider: 'Coinbase Exchange', source: result.source,
+    freshness: sourceStatus(result.source, result.fetchedAt, 15 * 60_000),
+    message: 'Coinbase BTC-USD 24시간 통계의 마지막 거래가 / 시작가. 제공처 거래시각 미제공: 수신시각 표시.',
+  };
+}
+
 async function bitcoin(): Promise<MarketIndicator> {
   try {
+    const stats = await proxyFetch<{ last?: string; open?: string }>({
+      key: 'morning-briefing:coinbase:btc-usd-stats',
+      url: 'https://api.exchange.coinbase.com/products/BTC-USD/stats',
+      ttlSec: 300, staleGraceSec: 3600,
+    });
+    return coinbaseBitcoin(stats);
+  } catch { /* independently cached public Yahoo quote is the fallback */ }
+  // Use the same guarded Yahoo path as the stock dashboard next. CoinGecko's
+  // anonymous endpoint frequently returns 429 on Render's shared egress IP,
+  // while BTC-USD is available from the already serialized/cached quote path.
+  try {
+    const response = await getYahooQuote('BTC-USD', '1d', '5d');
+    return {
+      key: 'btc', label: '비트코인', value: response.quote.price, unit: 'USD',
+      // Yahoo chart change is versus previous close, not a rolling 24h move.
+      changePercent: null,
+      asOfBasis: 'provider',
+      asOf: response.quote.asOf, fetchedAt: response.fetchedAt, provider: 'Yahoo Finance',
+      source: response.source as MarketIndicator['source'],
+      freshness: sourceStatus(response.source as ProxyResult<unknown>['source'], Date.parse(response.quote.asOf), 15 * 60_000),
+      message: 'Yahoo 이전 종가 대비 등락은 24시간 변동과 달라 표시하지 않습니다.',
+    };
+  } catch (yahooError) {
+    try {
     const result = await proxyFetch<CoinGeckoSimple>({
       key: 'morning-briefing:coingecko:bitcoin-usd',
       url: 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true',
-      ttlSec: 60,
-      staleGraceSec: 900,
+      ttlSec: 300,
+      staleGraceSec: 3600,
     });
     const row = result.data.bitcoin;
     if (!finite(row?.usd) || row.usd <= 0) throw new Error('비트코인 가격이 누락되었습니다.');
@@ -64,12 +115,59 @@ async function bitcoin(): Promise<MarketIndicator> {
     return {
       key: 'btc', label: '비트코인', value: row.usd, unit: 'USD',
       changePercent: finite(row.usd_24h_change) ? row.usd_24h_change : null,
+      changeBasis: 'rolling-24h', asOfBasis: finite(row.last_updated_at) ? 'provider' : 'received',
       asOf: iso(asOfMillis), fetchedAt: iso(result.fetchedAt), provider: 'CoinGecko', source: result.source,
       freshness: sourceStatus(result.source, asOfMillis, 15 * 60_000),
     };
-  } catch (error) {
-    return failed('btc', '비트코인', 'USD', 'CoinGecko', error);
+    } catch (coinGeckoError) {
+      const yahooMessage = yahooError instanceof Error ? yahooError.message : '';
+      const coinGeckoMessage = coinGeckoError instanceof Error ? coinGeckoError.message : '';
+      return failed('btc', '비트코인', 'USD', 'CoinGecko', new Error(`${yahooMessage} ${coinGeckoMessage}`.trim()));
+    }
   }
+}
+
+export function buildDailyView(indicators: MarketIndicator[]): MarketBriefing['dailyView'] {
+  const available = indicators.filter((item) => item.value != null);
+  const map = new Map(available.map((item) => [item.key, item]));
+  const evidenceKeys = available.map((item) => item.key);
+  if (!available.length) {
+    return {
+      headline: '확인된 시장지표가 없습니다',
+      interpretation: '제공처 응답을 확인한 뒤 브리핑을 다시 생성해 주세요.',
+      checklist: ['새로고침 후 각 지표의 제공처와 기준시각을 확인하세요.'],
+      evidenceKeys: [],
+    };
+  }
+
+  const risk = buildRisk(indicators);
+  const headline = risk.level === 'high'
+    ? '금리·환율 변동 위험을 우선 점검할 구간입니다'
+    : risk.level === 'moderate'
+      ? '확인된 지표에 일부 주의 신호가 있습니다'
+      : '확인된 지표의 위험 신호는 제한적입니다';
+  const facts: string[] = [];
+  const ten = map.get('us10y');
+  const thirty = map.get('us30y');
+  if (ten && thirty) facts.push(`미 국채 10년물 ${ten.value!.toFixed(2)}%, 30년물 ${thirty.value!.toFixed(2)}%`);
+  const jpy = map.get('usdjpy');
+  const krw = map.get('usdkrw');
+  if (jpy && krw) facts.push(`달러/엔 ${jpy.value!.toFixed(2)}, 원/달러 ${krw.value!.toLocaleString('ko-KR', { maximumFractionDigits: 2 })}`);
+  const btc = map.get('btc');
+  if (btc) facts.push(`비트코인 $${btc.value!.toLocaleString('en-US', { maximumFractionDigits: 0 })}${btc.changePercent == null ? '' : ` (${btc.changePercent >= 0 ? '+' : ''}${btc.changePercent.toFixed(2)}%)`}`);
+  if (!facts.length) facts.push(`${available.length}개 지표의 최신 확인값`);
+
+  const checklist: string[] = [];
+  if (ten) checklist.push(ten.value! >= 4.5 ? '10년물 4.5% 이상 지속 여부와 성장주 변동성을 함께 확인하세요.' : '10년물의 4.5% 재진입 여부를 확인하세요.');
+  if (krw) checklist.push(krw.value! >= 1400 ? '원/달러 1,400원 이상에서는 주가 수익과 환율 효과를 분리해 보세요.' : '해외주식 수익률에서 환율 효과를 분리해 기록하세요.');
+  if (btc) checklist.push(btc.changePercent == null ? '비트코인 가격은 확인됐지만 24시간 등락은 미확인입니다. 변동 위험을 단정하지 마세요.' : '비트코인 24시간 등락과 위험자산의 방향이 같은지 확인하세요.');
+  if (!checklist.length) checklist.push('확인된 지표의 기준시각과 다음 갱신값을 비교하세요.');
+  return {
+    headline,
+    interpretation: `${facts.join(' · ')}가 확인됐습니다. ${risk.score == null ? '수치가 더 확보되기 전에는 방향을 단정하지 않습니다.' : `규칙 기반 위험도는 ${risk.score}점입니다.`}`,
+    checklist,
+    evidenceKeys,
+  };
 }
 
 async function yahooIndicator(key: 'usdjpy' | 'usdkrw', symbol: 'JPY=X' | 'KRW=X', label: string, unit: 'JPY/USD' | 'KRW/USD'): Promise<MarketIndicator> {
@@ -188,6 +286,7 @@ export async function getMarketBriefing(): Promise<MarketBriefing> {
     generatedAt: new Date().toISOString(),
     coverage: { status: succeeded === indicators.length ? 'complete' : succeeded ? 'partial' : 'failed', requested: indicators.length, succeeded, failed: indicators.length - succeeded },
     indicators,
+    dailyView: buildDailyView(indicators),
     macroDrivers: buildMacroDrivers(indicators),
     scenarios: buildScenarios(indicators),
     risk: buildRisk(indicators),

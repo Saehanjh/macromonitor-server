@@ -1,20 +1,14 @@
+import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 import * as cache from '../services/cache';
 
 const router = Router();
+router.use(requireRealMacroData);
 type Pt = { t: number; v: number };
 
-function synth(base: number, n: number, vol: number, drift = 0): number[] {
-  const out: number[] = [];
-  let v = base;
-  for (let i = 0; i < n; i++) {
-    v = Math.max(base * 0.2, v + (Math.random() - 0.5) * vol + drift);
-    out.push(v);
-  }
-  return out;
-}
+
 
 // ── 1) Stablecoins (CoinGecko market cap charts) ───────────────────────
 interface CgChart {
@@ -46,14 +40,14 @@ router.get('/stablecoins', async (req: Request, res: Response, next: NextFunctio
       usdt = a.data.market_caps ?? [];
       usdc = b.data.market_caps ?? [];
       if (usdt.length && usdc.length) source = 'live';
-    } catch { /* fall through to dummy */ }
+    } catch { /* input remains unavailable */ }
 
     if (!usdt.length || !usdc.length) {
       const n = Number(days);
       const now = Date.now();
       const day = 86400_000;
-      const u = synth(118e9, n, 4e8, 1.5e8);
-      const c = synth(34e9, n, 2e8, 1.2e8);
+      const u = ([] as number[]);
+      const c = ([] as number[]);
       usdt = u.map((v, i) => [now - (n - 1 - i) * day, v]);
       usdc = c.map((v, i) => [now - (n - 1 - i) * day, v]);
       source = 'dummy';
@@ -119,29 +113,10 @@ async function buildRwaHistory(slugs: string[]): Promise<Pt[]> {
     .map(([mk, v]) => ({ t: mk, v: Number((v / 1e9).toFixed(3)) }));
 }
 
-function dummyRwaHistory(): Pt[] {
-  const now = Math.floor(Date.now() / 1000);
-  const month = 2_629_800;
-  const out: Pt[] = [];
-  let v = 2.1;
-  for (let i = 23; i >= 0; i--) {
-    v = Math.max(1, v + (Math.random() - 0.3) * 0.4);
-    out.push({ t: now - i * month, v: Number(v.toFixed(3)) });
-  }
-  return out;
-}
+
 
 function dummyRwaResponse() {
-  const names = ['Ondo Finance', 'Hashnote', 'BlackRock BUIDL', 'Franklin OnChain', 'Superstate', 'OpenEden', 'Backed', 'Maple', 'USUAL', 'Mountain'];
-  const tvls = [620e6, 510e6, 480e6, 410e6, 260e6, 210e6, 160e6, 140e6, 120e6, 90e6];
-  const cat = tvls.reduce((a, b) => a + b, 0);
-  return {
-    categoryTvl: Number(cat.toFixed(0)),
-    tBillTvl: Number((cat * 0.72).toFixed(0)),
-    protocols: names.map((name, i) => ({ rank: i + 1, name, tvl: Number(tvls[i].toFixed(0)), share: Number(((tvls[i] / cat) * 100).toFixed(1)), slug: name.toLowerCase().replace(/\s+/g, '-') })),
-    history: dummyRwaHistory(),
-    source: 'dummy' as const,
-  };
+  return { protocols: [], history: [], source: 'dummy' as const };
 }
 
 router.get('/rwa', async (_req: Request, res: Response, next: NextFunction) => {
@@ -175,7 +150,7 @@ router.get('/rwa', async (_req: Request, res: Response, next: NextFunction) => {
 
     const slugs = top.slice(0, 6).map((t) => t.slug).filter((s): s is string => !!s);
     let history = await buildRwaHistory(slugs);
-    if (history.length < 2) history = dummyRwaHistory();
+    if (history.length < 2) history = ([] as Pt[]);
 
     res.json({
       categoryTvl: Number(categoryTvl.toFixed(0)),
@@ -223,16 +198,7 @@ function parseFarsideMarkdown(text: string): Array<{ t: number; flow: number }> 
   return rows;
 }
 
-function dummyEtf(): Array<{ t: number; flow: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const day = 86400;
-  const out: Array<{ t: number; flow: number }> = [];
-  for (let i = 39; i >= 0; i--) {
-    const flow = Math.round((Math.random() - 0.35) * 500);
-    out.push({ t: now - i * day, flow });
-  }
-  return out;
-}
+
 
 router.get('/btc-etf', async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -267,7 +233,7 @@ router.get('/btc-etf', async (_req: Request, res: Response, next: NextFunction) 
       }
     }
     if (daily.length === 0) {
-      daily = dummyEtf();
+      daily = ([] as Array<{ t: number; flow: number }>);
       source = 'dummy';
     }
 

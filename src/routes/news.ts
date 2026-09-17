@@ -75,21 +75,6 @@ async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
   return typeof r.data === 'string' ? parseRss(r.data, feed) : [];
 }
 
-// ── curated fallback (used only if every feed fails) ───────────────────
-const SEED: Omit<NewsItem, 'publishedAt'>[] = [
-  { id: 'n01', title: 'Powell, "데이터 의존적 접근 유지" 발언… 시장은 동결 가능성 반영', source: 'Reuters', category: 'fed', highlight: true },
-  { id: 'n02', title: 'NY Fed RRP 잔고 변동 — 단기 유동성 모니터링 지속', source: 'Bloomberg', category: 'fed', highlight: true },
-  { id: 'n03', title: '미 재무부 분기 차입계획 발표 — 장기물 발행 비중 주목', source: 'WSJ', category: 'bonds', highlight: false },
-  { id: 'n04', title: '10년물 금리 변동성 확대, 모기지 금리 동반 상승', source: 'Reuters', category: 'bonds', highlight: false },
-  { id: 'n05', title: 'BoJ 정책 정상화 경로 주시 — 엔화 흐름 변동', source: 'Nikkei', category: 'global', highlight: true },
-  { id: 'n08', title: 'NVIDIA 데이터센터 수요 지속 — AI 투자 사이클 점검', source: 'CNBC', category: 'tech', highlight: false },
-  { id: 'n09', title: '비트코인 현물 ETF 자금 흐름 — 기관 수요 동향', source: 'CoinDesk', category: 'onchain', highlight: true },
-  { id: 'n10', title: 'USDC/USDT 시총 추이 — 온체인 달러 유동성 점검', source: 'The Block', category: 'onchain', highlight: false },
-];
-function seedItems(now: number): NewsItem[] {
-  return SEED.map((s, i) => ({ ...s, publishedAt: new Date(now - (i * 47 + 13) * 60_000).toISOString() }));
-}
-
 router.get('/', async (req, res, next) => {
   try {
     const category = String(req.query.category ?? 'all') as NewsCategory | 'all';
@@ -101,10 +86,10 @@ router.get('/', async (req, res, next) => {
     const settled = await Promise.allSettled(FEEDS.map(fetchFeed));
     let all: NewsItem[] = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
-    let source: 'live' | 'dummy' = 'live';
+    const source = 'live';
     if (all.length === 0) {
-      all = seedItems(now);
-      source = 'dummy';
+      res.status(503).json({ error: 'news_unavailable', message: '실제 뉴스 피드를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.' });
+      return;
     }
 
     // de-dupe by title, newest first
@@ -123,7 +108,7 @@ router.get('/', async (req, res, next) => {
       const within = Date.parse(n.publishedAt) >= cutoff;
       const matches = category === 'all' || n.category === category;
       // live feeds: keep even if slightly older so the list isn't empty
-      return (source === 'dummy' ? within : true) && matches;
+      return within && matches;
     });
 
     let items = filtered.slice(0, 50);
