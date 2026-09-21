@@ -15,6 +15,51 @@ interface CgChart {
   market_caps?: [number, number][];
 }
 const STABLE_DAYS = new Set(['30', '90', '180', '365']);
+const LLAMA_STABLECOINS_BASE = 'https://stablecoins.llama.fi';
+const STABLECOIN_IDS = { usdt: 1, usdc: 2 } as const;
+
+interface LlamaStablecoinChartPoint {
+  date?: number;
+  totalCirculatingUSD?: number;
+  totalCirculating?: number;
+  circulating?: number | { peggedUSD?: number };
+}
+
+function llamaCirculatingValue(point: LlamaStablecoinChartPoint): number | undefined {
+  const circulating = typeof point.circulating === 'number'
+    ? point.circulating
+    : point.circulating?.peggedUSD;
+  return point.totalCirculatingUSD ?? point.totalCirculating ?? circulating;
+}
+
+export function stableSeriesFromCharts(
+  usdt: LlamaStablecoinChartPoint[],
+  usdc: LlamaStablecoinChartPoint[],
+  days: number,
+): Array<{ t: number; total: number; dominance: number }> {
+  const earliest = Math.floor(Date.now() / 1000) - days * 86_400;
+  const usdtByDate = new Map(usdt
+    .filter((point) => Number.isFinite(point.date) && Number.isFinite(llamaCirculatingValue(point)))
+    .map((point) => [point.date!, llamaCirculatingValue(point)!]));
+  const usdcByDate = new Map(usdc
+    .filter((point) => Number.isFinite(point.date) && Number.isFinite(llamaCirculatingValue(point)))
+    .map((point) => [point.date!, llamaCirculatingValue(point)!]));
+  return [...new Set([...usdtByDate.keys(), ...usdcByDate.keys()])]
+    .filter((date) => date >= earliest)
+    .sort((a, b) => a - b)
+    .flatMap((date) => {
+      const tether = usdtByDate.get(date);
+      const usdCoin = usdcByDate.get(date);
+      if (!Number.isFinite(tether) || !Number.isFinite(usdCoin)) return [];
+      const total = tether! + usdCoin!;
+      if (total <= 0) return [];
+      return [{
+        t: date,
+        total: Number((total / 1e9).toFixed(2)),
+        dominance: Number(((usdCoin! / total) * 100).toFixed(2)),
+      }];
+    });
+}
 
 router.get('/stablecoins', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -22,7 +67,64 @@ router.get('/stablecoins', async (req: Request, res: Response, next: NextFunctio
     const base = 'https://api.coingecko.com/api/v3';
     let usdt: [number, number][] = [];
     let usdc: [number, number][] = [];
-    let source: 'live' | 'dummy' = 'dummy';
+    let source: 'live' | 'unavailable' = 'unavailable';
+
+    // DefiLlama supplies these histories without CoinGecko's shared public
+    // rate limit. It is the primary source; CoinGecko remains a fallback.
+    try {
+      const [tether, usdCoin] = await Promise.all([
+        proxyFetch<unknown>({
+          key: `onchain:llama:stablecoin:${STABLECOIN_IDS.usdt}`,
+          url: `${LLAMA_STABLECOINS_BASE}/stablecoin/${STABLECOIN_IDS.usdt}`,
+          ttlSec: config.cache.stable,
+          // Detail histories are large because they include every chain.
+          // The normal ten-second JSON timeout cuts off a valid response on
+          // a cold free instance before the real series can be aggregated.
+          axiosConfig: { timeout: 45_000 },
+        }),
+        proxyFetch<unknown>({
+          key: `onchain:llama:stablecoin:${STABLECOIN_IDS.usdc}`,
+          url: `${LLAMA_STABLECOINS_BASE}/stablecoin/${STABLECOIN_IDS.usdc}`,
+          ttlSec: config.cache.stable,
+          axiosConfig: { timeout: 45_000 },
+        }),
+      ]);
+      // The endpoint returns either a direct history array or an object with
+      // the history under `circulating`; support both documented shapes.
+      const toHistory = (value: unknown): LlamaStablecoinChartPoint[] => {
+        if (Array.isArray(value)) return value;
+        if (value && typeof value === 'object') {
+          const record = value as {
+            circulating?: unknown;
+            data?: unknown;
+            chainBalances?: Record<string, { tokens?: LlamaStablecoinChartPoint[] }>;
+          };
+          if (Array.isArray(record.circulating)) return record.circulating as LlamaStablecoinChartPoint[];
+          if (Array.isArray(record.data)) return record.data as LlamaStablecoinChartPoint[];
+          // DefiLlama's stablecoin detail endpoint keeps historical values per
+          // chain. Aggregate the real chain observations by date to recover
+          // the coin's global circulating amount.
+          if (record.chainBalances) {
+            const totals = new Map<number, number>();
+            for (const chain of Object.values(record.chainBalances)) {
+              for (const point of chain.tokens ?? []) {
+                const amount = llamaCirculatingValue(point);
+                if (Number.isFinite(point.date) && Number.isFinite(amount)) {
+                  totals.set(point.date!, (totals.get(point.date!) ?? 0) + amount!);
+                }
+              }
+            }
+            return [...totals.entries()].map(([date, circulating]) => ({ date, circulating }));
+          }
+        }
+        return [];
+      };
+      const series = stableSeriesFromCharts(toHistory(tether.data), toHistory(usdCoin.data), Number(days));
+      if (series.length) {
+        res.json({ series, latest: series[series.length - 1], source: 'live', provider: 'DefiLlama' });
+        return;
+      }
+    } catch { /* use CoinGecko only when DefiLlama is temporarily unavailable */ }
 
     try {
       const [a, b] = await Promise.all([
@@ -43,14 +145,10 @@ router.get('/stablecoins', async (req: Request, res: Response, next: NextFunctio
     } catch { /* input remains unavailable */ }
 
     if (!usdt.length || !usdc.length) {
-      const n = Number(days);
-      const now = Date.now();
-      const day = 86400_000;
-      const u = ([] as number[]);
-      const c = ([] as number[]);
-      usdt = u.map((v, i) => [now - (n - 1 - i) * day, v]);
-      usdc = c.map((v, i) => [now - (n - 1 - i) * day, v]);
-      source = 'dummy';
+      // Never manufacture a market-cap chart. The macro middleware turns this
+      // explicit unavailable response into the standard retryable 503 state.
+      res.json({ series: [], latest: null, source: 'unavailable', provider: 'DefiLlama/CoinGecko' });
+      return;
     }
 
     const n = Math.min(usdt.length, usdc.length);
@@ -66,7 +164,7 @@ router.get('/stablecoins', async (req: Request, res: Response, next: NextFunctio
       });
     }
 
-    res.json({ series, latest: series[series.length - 1] ?? null, source });
+    res.json({ series, latest: series[series.length - 1] ?? null, source, provider: 'CoinGecko' });
   } catch (err) {
     next(err);
   }

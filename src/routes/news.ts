@@ -89,6 +89,15 @@ export async function fetchLatestNews(limit = 8, maxAgeHours = 24 * 7): Promise<
     .slice(0, Math.max(1, Math.min(20, limit)));
 }
 
+/** Translate live headlines once at the server boundary so every consumer
+ * (news screen, briefings, and generated market updates) gets the same title
+ * and retains the original headline for provenance. */
+export async function translateNewsItems(items: NewsItem[]): Promise<NewsItem[]> {
+  if (!config.translateNews || items.length === 0) return items;
+  const titlesKo = await translateBatch(items.map((n) => n.title), 'ko');
+  return items.map((n, i) => ({ ...n, titleEn: n.title, title: titlesKo[i] || n.title }));
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const category = String(req.query.category ?? 'all') as NewsCategory | 'all';
@@ -116,10 +125,7 @@ router.get('/', async (req, res, next) => {
     let items = filtered.slice(0, 50);
 
     // translate live English headlines to Korean (cached; best-effort)
-    if (source === 'live' && config.translateNews && items.length) {
-      const titlesKo = await translateBatch(items.map((n) => n.title), 'ko');
-      items = items.map((n, i) => ({ ...n, titleEn: n.title, title: titlesKo[i] || n.title }));
-    }
+    if (source === 'live' && items.length) items = await translateNewsItems(items);
 
     const highlights = items.filter((n) => n.highlight).slice(0, 3);
 

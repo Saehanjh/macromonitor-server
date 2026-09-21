@@ -1,6 +1,6 @@
 import { getMarketBriefing, MarketBriefing, MarketIndicator } from './marketBriefing';
 import { getYahooQuote } from '../routes/yahoo';
-import { fetchLatestNews, NewsItem } from '../routes/news';
+import { fetchLatestNews, NewsItem, translateNewsItems } from '../routes/news';
 import * as cache from './cache';
 
 const CACHE_KEY = 'us-market-update:latest';
@@ -85,7 +85,7 @@ async function fetchFresh(): Promise<USMarketUpdate> {
   const [briefing, equities, headlines] = await Promise.all([
     getMarketBriefing(),
     Promise.all([fetchEquity('SPY', 'S&P 500 ETF'), fetchEquity('QQQ', '나스닥 100 ETF'), fetchEquity('DIA', '다우존스 ETF')]),
-    fetchLatestNews(8, 36),
+    fetchLatestNews(8, 36).then(translateNewsItems),
   ]);
   // Never replace a useful cached report with an empty all-provider failure.
   if (briefing.coverage.status === 'failed' && equities.every((item) => item.value == null) && headlines.length === 0) {

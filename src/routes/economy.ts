@@ -21,21 +21,62 @@ async function fetchYahooCloses(symbol: string, range = '2mo', interval = '1d'):
 interface FredResp {
   observations?: Array<{ date: string; value: string }>;
 }
-async function fetchFredPoints(seriesId: string, limit: number): Promise<Pt[]> {
-  const params = new URLSearchParams({
-    series_id: seriesId,
-    api_key: config.fredApiKey,
-    file_type: 'json',
-    sort_order: 'desc',
-    limit: String(limit),
+/**
+ * The documented FRED API requires a key.  FRED's own graph CSV export is
+ * public, however, and is a useful authoritative fallback when a deployment
+ * is missing a key or the keyed endpoint is temporarily unavailable.
+ */
+export function parseFredGraphCsv(csv: string, limit: number): Pt[] {
+  const rows = csv.trim().split(/\r?\n/);
+  if (rows.length < 2) return [];
+  return rows.slice(1)
+    .map((row) => {
+      const comma = row.indexOf(',');
+      if (comma < 0) return null;
+      const date = row.slice(0, comma).trim();
+      const value = Number(row.slice(comma + 1).trim());
+      const t = Math.floor(Date.parse(date) / 1000);
+      return Number.isFinite(t) && Number.isFinite(value) ? { t, v: value } : null;
+    })
+    .filter((point): point is Pt => point !== null)
+    .slice(-limit);
+}
+
+async function fetchFredGraphCsvPoints(seriesId: string, limit: number): Promise<Pt[]> {
+  const observationStart = new Date();
+  observationStart.setUTCFullYear(observationStart.getUTCFullYear() - 6);
+  const start = observationStart.toISOString().slice(0, 10);
+  const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?${new URLSearchParams({ id: seriesId, cos: 'Close', observation_start: start }).toString()}`;
+  const r = await proxyFetch<string>({
+    key: `fredcsv:${seriesId}:${limit}`,
+    url,
+    ttlSec: config.cache.macro,
+    axiosConfig: { responseType: 'text', headers: { Accept: 'text/csv' } },
   });
-  const url = `https://api.stlouisfed.org/fred/series/observations?${params.toString()}`;
-  const r = await proxyFetch<FredResp>({ key: `fred:${seriesId}:e:${limit}`, url, ttlSec: config.cache.macro });
-  return (r.data.observations ?? [])
-    .filter((o) => o.value !== '.' && o.value !== '')
-    .map((o) => ({ t: Math.floor(Date.parse(o.date) / 1000), v: Number(o.value) }))
-    .filter((p) => Number.isFinite(p.v))
-    .reverse();
+  return parseFredGraphCsv(r.data, limit);
+}
+
+async function fetchFredPoints(seriesId: string, limit: number): Promise<Pt[]> {
+  if (hasFredKey()) {
+    try {
+      const params = new URLSearchParams({
+        series_id: seriesId,
+        api_key: config.fredApiKey,
+        file_type: 'json',
+        sort_order: 'desc',
+        limit: String(limit),
+      });
+      const url = `https://api.stlouisfed.org/fred/series/observations?${params.toString()}`;
+      const r = await proxyFetch<FredResp>({ key: `fred:${seriesId}:e:${limit}`, url, ttlSec: config.cache.macro });
+      const points = (r.data.observations ?? [])
+        .filter((o) => o.value !== '.' && o.value !== '')
+        .map((o) => ({ t: Math.floor(Date.parse(o.date) / 1000), v: Number(o.value) }))
+        .filter((p) => Number.isFinite(p.v))
+        .reverse();
+      if (points.length) return points;
+    } catch { /* use FRED's public graph export below */ }
+  }
+  return fetchFredGraphCsvPoints(seriesId, limit);
 }
 
 
@@ -180,23 +221,38 @@ router.get('/corporate', async (_req: Request, res: Response, next: NextFunction
     }
 
     const buildComposite = async (defs: typeof MFG_DEFS) => {
-      const components = await Promise.all(
-        defs.map(async (d) => {
-          let v: number | null = null;
-          if (hasFredKey()) v = await latestVal(d.id);
-          const live = v != null;
-          if (live) anyLive = true;
-          return { name: d.name, value: Number((live ? v! : Number.NaN).toFixed(1)), live };
-        }),
-      );
+      // FRED permits the individual series but can reject a burst of seven
+      // requests from Render's shared address.  Fetch these small observations
+      // in sequence; proxy caching makes later screen visits immediate.
+      const attempted: Array<{ name: string; value: number; live: true } | null> = [];
+      for (const d of defs) {
+        let v: number | null = null;
+        try { v = await latestVal(d.id); } catch { /* unavailable component is omitted */ }
+        const live = v != null;
+        if (live) anyLive = true;
+        attempted.push(live ? { name: d.name, value: Number(v!.toFixed(1)), live: true } : null);
+      }
+      // A regional survey can be delayed or discontinued independently. Show
+      // the real observations that are available rather than rejecting the
+      // entire Corporate Pulse card or filling a missing survey with a value.
+      const components = attempted.filter((component): component is { name: string; value: number; live: true } => component !== null);
+      if (!components.length) return null;
       const avg = components.reduce((a, c) => a + c.value, 0) / components.length;
-      return { value: Number(avg.toFixed(1)), components };
+      return { value: Number(avg.toFixed(1)), components, coverage: { available: components.length, total: defs.length } };
     };
 
     const mfg = await buildComposite(MFG_DEFS);
     const svc = await buildComposite(SVC_DEFS);
 
-    res.json({ gdpNow: Number(gdpNow.toFixed(1)), mfg, svc, source: anyLive ? 'live' : 'dummy' });
+    if (!mfg || !svc || !Number.isFinite(gdpNow) || !anyLive) {
+      res.status(503).json({
+        error: 'macro_data_unavailable',
+        message: '기업활동 실측치를 충분히 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.',
+        endpoint: '/api/economy/corporate',
+      });
+      return;
+    }
+    res.json({ gdpNow: Number(gdpNow.toFixed(1)), mfg, svc, source: 'live' });
   } catch (err) {
     next(err);
   }
