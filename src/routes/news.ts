@@ -93,7 +93,11 @@ export async function fetchLatestNews(limit = 8, maxAgeHours = 24 * 7): Promise<
  * (news screen, briefings, and generated market updates) gets the same title
  * and retains the original headline for provenance. */
 export async function translateNewsItems(items: NewsItem[]): Promise<NewsItem[]> {
-  if (!config.translateNews || items.length === 0) return items;
+  // Korean is the product language.  Older Render environments could still
+  // carry TRANSLATE_NEWS=false from an early optional experiment, which left
+  // every live headline in English despite the app requesting Korean.  Keep
+  // the provider calls best-effort, but always attempt the Korean conversion.
+  if (items.length === 0) return items;
   const titlesKo = await translateBatch(items.map((n) => n.title), 'ko');
   return items.map((n, i) => ({ ...n, titleEn: n.title, title: titlesKo[i] || n.title }));
 }
