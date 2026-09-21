@@ -89,7 +89,10 @@ async function translateOne(text: string, target: string): Promise<string> {
   // accept only a response containing Korean text.
   try {
     const { data: mirror } = await axios.get<{ responseData?: { translatedText?: string } }>('https://api.mymemory.translated.net/get', {
-      params: { q: clean, langpair: `auto|${target}` },
+      // MyMemory does not accept "auto" as a source language.  The input is
+      // an English RSS headline, so state that explicitly; otherwise it
+      // returns HTTP 403 and silently forces the English fallback.
+      params: { q: clean, langpair: `en|${target}` },
       timeout: 4500,
       headers: { 'User-Agent': 'MacroMonitor/1.0', Accept: 'application/json' },
     });
