@@ -63,7 +63,10 @@ async function translateOne(text: string, target: string): Promise<string> {
 
   const key = `tr:${target}:${clean}`;
   const cached = cache.peek<string>(key);
-  if (cached !== null) return cached;
+  // Older deployments cached the English source when Google rejected the
+  // request.  Treat such an entry as a cache miss so it can be translated by
+  // the alternate provider instead of remaining English for a full week.
+  if (cached !== null && (target !== 'ko' || KOREAN_RE.test(cached))) return cached;
 
   try {
     const url =
