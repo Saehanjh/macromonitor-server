@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { config } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
 import axios from 'axios';
+import { YAHOO_HEADERS, reserveYahooRequest, noteYahooFailure, YahooRateLimitedError, isYahooRateLimited } from '../services/yahooProvider';
 
 const router = Router();
 
@@ -60,56 +61,7 @@ const HISTORY_PERIODS: Record<ChartPeriod, { interval: string; range: string }> 
   monthly: { interval: '1mo', range: '5y' },
 };
 
-const YAHOO_HEADERS = {
-  // Yahoo sometimes serves an Edge 429 to generic proxy user agents. A normal
-  // browser-compatible accept profile is both supported by the public chart
-  // endpoint and materially more reliable on shared cloud egress addresses.
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  Accept: 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-};
-
-let yahooQueue: Promise<void> = Promise.resolve();
-let nextYahooRequestAt = 0;
-let yahooCooldownUntil = 0;
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-class YahooRateLimitedError extends Error {
-  constructor() {
-    super('Yahoo 시세 제공자가 요청을 잠시 제한했습니다. 잠시 후 다시 시도해 주세요.');
-    this.name = 'YahooRateLimitedError';
-  }
-}
-
-/**
- * Render users share an outbound IP. Serialize only cache-miss Yahoo calls so
- * ten dashboard tickers do not become a simultaneous anonymous-provider burst.
- */
-function reserveYahooRequest(): Promise<void> {
-  const task = yahooQueue.then(async () => {
-    const now = Date.now();
-    // A known provider cooldown is a circuit breaker, not a reason to make
-    // every request wait for two minutes and then time out on the phone.
-    if (now < yahooCooldownUntil) throw new YahooRateLimitedError();
-    const delay = Math.max(0, nextYahooRequestAt - now);
-    if (delay) await sleep(delay);
-    nextYahooRequestAt = Date.now() + config.yahooMinIntervalMs;
-  });
-  // Keep the queue usable after any earlier provider failure.
-  yahooQueue = task.catch(() => undefined);
-  return task;
-}
-
-function noteYahooFailure(error: unknown): void {
-  if (axios.isAxiosError(error) && error.response?.status === 429) {
-    yahooCooldownUntil = Math.max(yahooCooldownUntil, Date.now() + config.yahooCooldownSec * 1000);
-  }
-}
-
-function isRateLimited(error: unknown): boolean {
-  return error instanceof YahooRateLimitedError || (axios.isAxiosError(error) && error.response?.status === 429);
-}
+const isRateLimited = isYahooRateLimited;
 
 function isProviderUnavailable(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false;

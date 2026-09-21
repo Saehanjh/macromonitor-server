@@ -23,6 +23,7 @@ import personalRouter from './routes/personal';
 import { startBriefingCron } from './services/briefingCron';
 import { initializePersonalStore } from './services/personalStore';
 import morningBriefingRouter from './routes/morningBriefing';
+import usMarketUpdateRouter from './routes/usMarketUpdate';
 
 const app = express();
 
@@ -46,7 +47,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     apiVersion: '2026-09-11',
-    capabilities: ['quotes.batch', 'markets.morning-briefing', 'personal.briefings', 'personal.events', 'personal.notes'],
+    capabilities: ['quotes.batch', 'markets.morning-briefing', 'markets.us-market-update', 'personal.briefings', 'personal.events', 'personal.notes'],
     uptime: process.uptime(),
     cacheSize: cache.size(),
     env: config.nodeEnv,
@@ -63,6 +64,7 @@ app.use('/api/news', newsRouter);
 app.use('/api/calendar', calendarRouter);
 app.use('/api/markets', marketsRouter);
 app.use('/api/morning-briefing', morningBriefingRouter);
+app.use('/api/us-market-update', usMarketUpdateRouter);
 app.use('/api/economy', economyRouter);
 app.use('/api/global', globalRouter);
 app.use('/api/onchain', onchainRouter);

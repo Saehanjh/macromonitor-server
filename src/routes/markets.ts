@@ -2,6 +2,7 @@ import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
+import { fetchYahooChart } from '../services/yahooProvider';
 import { zscore, pctChange } from '../services/stats';
 
 const router = Router();
@@ -45,14 +46,7 @@ function extractSeries(data: YahooChartResponse): Series {
 }
 
 async function fetchYahoo(symbol: string, range: string, interval = '1d'): Promise<Series> {
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${interval}&range=${range}&includePrePost=false`;
-  const result = await proxyFetch<YahooChartResponse>({
-    key: `yahoo:${symbol}:${interval}:${range}`,
-    url,
-    ttlSec: config.cache.price,
-  });
+  const result = await fetchYahooChart<YahooChartResponse>(symbol, range, interval);
   return extractSeries(result.data);
 }
 
@@ -315,14 +309,7 @@ function extractFull(data: YahooFullResponse): FullSeries {
 }
 
 async function fetchYahooFull(symbol: string, range = '1mo', interval = '1d'): Promise<FullSeries> {
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${interval}&range=${range}&includePrePost=false`;
-  const result = await proxyFetch<YahooFullResponse>({
-    key: `yahoo:${symbol}:${interval}:${range}`,
-    url,
-    ttlSec: config.cache.price,
-  });
+  const result = await fetchYahooChart<YahooFullResponse>(symbol, range, interval);
   return extractFull(result.data);
 }
 

@@ -16,6 +16,15 @@ server mode must treat `source: "dummy"` as unavailable live data.
   US 30Y with provider, observation time, fetch time, cache/stale status,
   partial-data coverage, evidence-backed macro drivers and rule-based scenarios.
   Missing providers remain explicit `unavailable`; the route never invents a value.
+- `GET /api/us-market-update?refresh=1` returns a deterministic latest US market
+  report assembled from the same verified market indicators. It includes
+  `generatedAt`, New York `reportDate`, coverage, provider observation/fetch
+  times, evidence-backed text, and `source` (`fresh`, `cache`, or `stale`).
+  Reports are cached for 15 minutes; `refresh=1` forces an upstream refresh.
+  The report also includes bounded SPY/QQQ/DIA Yahoo snapshots and up to eight
+  real RSS headlines with original URLs and publication times. Provider failures
+  are returned as explicit `unavailable` entries; if every provider fails, a
+  previous stale report is retained when available.
 - `GET /api/coingecko/{simple/price,coins/markets,coins/:id/market_chart,global}`
 - `GET /api/defillama/{stablecoins,stablecoincharts/all,tvl/:protocol,protocols}`
 - `GET /api/news?category&window`, `GET /api/calendar?date`

@@ -2,6 +2,7 @@ import { requireRealMacroData } from '../middleware/realMacroData';
 import { Router, Request, Response, NextFunction } from 'express';
 import { config, hasFredKey } from '../config';
 import { proxyFetch } from '../services/proxyFetch';
+import { fetchYahooChart } from '../services/yahooProvider';
 
 const router = Router();
 router.use(requireRealMacroData);
@@ -12,10 +13,7 @@ interface YahooResp {
   chart: { result?: Array<{ indicators?: { quote?: Array<{ close?: (number | null)[] }> } }> };
 }
 async function fetchYahooCloses(symbol: string, range = '2mo', interval = '1d'): Promise<number[]> {
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${interval}&range=${range}&includePrePost=false`;
-  const r = await proxyFetch<YahooResp>({ key: `yahoo:${symbol}:${interval}:${range}`, url, ttlSec: config.cache.price });
+  const r = await fetchYahooChart<YahooResp>(symbol, range, interval);
   const closes = r.data.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
   return closes.filter((c): c is number => c != null && Number.isFinite(c));
 }

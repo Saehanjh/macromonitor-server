@@ -8,7 +8,7 @@ const router = Router();
 
 type NewsCategory = 'fed' | 'bonds' | 'global' | 'tech' | 'onchain';
 
-interface NewsItem {
+export interface NewsItem {
   id: string;
   title: string; // Korean (translated) when available
   titleEn?: string; // original English headline
@@ -49,6 +49,8 @@ function parseRss(xml: string, feed: Feed): NewsItem[] {
     if (!url) url = node.find('link').first().attr('href') ?? '';
     const pub = node.find('pubDate, published, updated, dc\\:date').first().text().trim();
     const ts = pub ? Date.parse(pub) : NaN;
+    // A feed item without a parseable publication time cannot be presented as recent.
+    if (!Number.isFinite(ts)) return;
     out.push({
       id: `${feed.source}-${feed.category}-${i}`,
       title,
@@ -75,6 +77,18 @@ async function fetchFeed(feed: Feed): Promise<NewsItem[]> {
   return typeof r.data === 'string' ? parseRss(r.data, feed) : [];
 }
 
+/** Fetch a bounded set of real RSS headlines for server-generated reports. */
+export async function fetchLatestNews(limit = 8, maxAgeHours = 24 * 7): Promise<NewsItem[]> {
+  const cutoff = Date.now() - maxAgeHours * 3_600_000;
+  const settled = await Promise.allSettled(FEEDS.map(fetchFeed));
+  const seen = new Set<string>();
+  return settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []))
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
+    .filter((item) => { const published = Date.parse(item.publishedAt); return published >= cutoff && published <= Date.now() + 5 * 60_000; })
+    .filter((item) => { const key = item.title.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; })
+    .slice(0, Math.max(1, Math.min(20, limit)));
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const category = String(req.query.category ?? 'all') as NewsCategory | 'all';
@@ -83,25 +97,13 @@ router.get('/', async (req, res, next) => {
     const now = Date.now();
 
     // fetch all feeds in parallel; tolerate individual failures
-    const settled = await Promise.allSettled(FEEDS.map(fetchFeed));
-    let all: NewsItem[] = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
+    let all: NewsItem[] = await fetchLatestNews(50);
 
     const source = 'live';
     if (all.length === 0) {
       res.status(503).json({ error: 'news_unavailable', message: '실제 뉴스 피드를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.' });
       return;
     }
-
-    // de-dupe by title, newest first
-    const seen = new Set<string>();
-    all = all
-      .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
-      .filter((n) => {
-        const k = n.title.toLowerCase();
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
 
     const cutoff = now - windowMs;
     const filtered = all.filter((n) => {
